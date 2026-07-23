@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { discoverRules, parseRuleFile } from "../dist/discovery.js";
+import { discoverRules, loadRuleConfig, parseRuleFile } from "../dist/discovery.js";
 import extension, { CUSTOM_MESSAGE_TYPE } from "../dist/index.js";
 import { extractTarget, ruleMatchesTarget } from "../dist/matching.js";
 
@@ -66,23 +66,123 @@ function toolResult(toolName, filePath, overrides = {}) {
   };
 }
 
-test("discovers nested .agents and .claude rules in deterministic order", async () => {
+test("uses first non-empty rule root and sorts nested files", async () => {
   await withTempDirectory(async (cwd) => {
-    await writeRule(cwd, ".agents/rules/z.md", "Always Z");
-    await writeRule(cwd, ".agents/rules/backend/auth.md", "---\npaths: src/auth/**\n---\nAuth rule");
-    await writeRule(cwd, ".claude/rules/a.md", "Always A");
-    await writeRule(cwd, ".agents/rules/ignored.txt", "not markdown");
+    await writeRule(cwd, ".pi/rules/z.md", "Always Z");
+    await writeRule(cwd, ".pi/rules/backend/auth.md", "---\npaths: src/auth/**\n---\nAuth rule");
+    await writeRule(cwd, ".agents/rules/a.md", "Ignored agents fallback");
+    await writeRule(cwd, ".claude/rules/a.md", "Ignored Claude fallback");
+    await writeRule(cwd, ".pi/rules/ignored.txt", "not markdown");
 
     const result = await discoverRules(cwd);
 
-    assert.deepEqual(
-      result.rules.map((rule) => rule.sourceLabel),
-      [".agents/rules/backend/auth.md", ".agents/rules/z.md", ".claude/rules/a.md"],
-    );
+    assert.deepEqual(result.rules.map((rule) => rule.sourceLabel), [".pi/rules/backend/auth.md", ".pi/rules/z.md"]);
     assert.deepEqual(result.rules[0].paths, ["src/auth/**"]);
     assert.equal(result.rules[0].body, "Auth rule");
     assert.equal(result.rules[1].paths, undefined);
     assert.equal(result.diagnostics.length, 0);
+  });
+});
+
+test("falls back through configured global rule roots", async () => {
+  await withTempDirectory(async (root) => {
+    const cwd = path.join(root, "repo");
+    const home = path.join(root, "home");
+    const piConfig = path.join(root, "pi-config");
+    const codingAgent = path.join(root, "coding-agent");
+    await mkdir(cwd, { recursive: true });
+    await writeRule(root, "pi-config/agent/rules/pi.md", "PI config rule");
+    await writeRule(root, "coding-agent/rules/agent.md", "Coding agent rule");
+    await writeRule(root, "home/.claude/rules/claude.md", "Claude rule");
+    await writeRule(root, "home/.agents/rules/agents.md", "Agents rule");
+
+    const configured = await discoverRules(cwd, {
+      home,
+      env: { PI_CONFIG_DIR: piConfig, PI_CODING_AGENT_DIR: codingAgent },
+    });
+    const piConfigOnly = await discoverRules(cwd, { home, env: { PI_CONFIG_DIR: piConfig } });
+    const codingAgentOnly = await discoverRules(cwd, { home, env: { PI_CODING_AGENT_DIR: codingAgent } });
+    const agentsFallback = await discoverRules(cwd, { home, env: { CLAUDE_CONFIG_DIR: path.join(home, ".claude") } });
+    await rm(path.join(home, ".agents"), { recursive: true, force: true });
+    const claudeFallback = await discoverRules(cwd, { home, env: { CLAUDE_CONFIG_DIR: path.join(home, ".claude") } });
+    await writeRule(root, "home/.pi/agent/rules/default-agent.md", "Default coding agent rule");
+    const defaultCodingAgent = await discoverRules(cwd, { home, env: {} });
+
+    assert.deepEqual(configured.rules.map((rule) => rule.body), ["Coding agent rule"]);
+    assert.deepEqual(piConfigOnly.rules.map((rule) => rule.body), ["PI config rule"]);
+    assert.deepEqual(codingAgentOnly.rules.map((rule) => rule.body), ["Coding agent rule"]);
+    assert.deepEqual(agentsFallback.rules.map((rule) => rule.body), ["Agents rule"]);
+    assert.deepEqual(claudeFallback.rules.map((rule) => rule.body), ["Claude rule"]);
+    assert.deepEqual(defaultCodingAgent.rules.map((rule) => rule.body), ["Default coding agent rule"]);
+  });
+});
+
+test("project config controls source order and reloads on compaction", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(
+      cwd,
+      ".pi/rules.json",
+      JSON.stringify({ note: "extra fields are allowed", sources: [{ scope: "repo", kind: "claude", extra: true }] }),
+    );
+    await writeRule(cwd, ".pi/rules/pi.md", "PI rule");
+    await writeRule(cwd, ".claude/rules/claude.md", "Claude rule");
+    const fake = createFakePi();
+    extension(fake.api);
+
+    await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
+    const first = await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
+    assert.match(first.message.content, /Claude rule/);
+    assert.doesNotMatch(first.message.content, /PI rule/);
+
+    await writeRule(cwd, ".pi/rules.json", JSON.stringify({ version: 1, sources: [{ scope: "repo", kind: "pi" }] }));
+    await fake.emit("session_compact", { type: "session_compact", willRetry: true }, { cwd });
+    assert.match(fake.sent[0].message.content, /PI rule/);
+  });
+});
+
+test("loads user config from resolved Pi coding-agent directory", async () => {
+  await withTempDirectory(async (root) => {
+    const cwd = path.join(root, "repo");
+    const home = path.join(root, "home");
+    const piConfig = path.join(root, "pi-config");
+    await mkdir(cwd, { recursive: true });
+    await writeRule(
+      root,
+      "pi-config/agent/rules.json",
+      JSON.stringify({ version: 1, sources: [{ scope: "user", kind: "agents" }] }),
+    );
+    await writeRule(root, "home/.agents/rules/user.md", "User agents rule");
+
+    const config = await loadRuleConfig(cwd, { home, env: { PI_CONFIG_DIR: piConfig } });
+    const result = await discoverRules(cwd, { home, env: { PI_CONFIG_DIR: piConfig }, sources: config.sources });
+
+    assert.equal(config.configPath, path.join(piConfig, "agent", "rules.json"));
+    assert.deepEqual(result.rules.map((rule) => rule.body), ["User agents rule"]);
+  });
+});
+
+test("warns without crashing when config fails TypeBox validation", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(cwd, ".pi/rules.json", JSON.stringify({ version: 1, sources: [{ scope: "repo", kind: "nope" }] }));
+    await writeRule(cwd, ".pi/rules/base.md", "Must not inject");
+    const fake = createFakePi();
+    const warnings = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = (chunk) => {
+      warnings.push(String(chunk));
+      return true;
+    };
+
+    try {
+      extension(fake.api);
+      await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
+      const injection = await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
+      assert.equal(injection, undefined);
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+
+    assert.match(warnings.join(""), /\[pi-rules\] invalid config \.pi\/rules\.json:/);
   });
 });
 
@@ -134,8 +234,8 @@ test("injects unconditional rules before first model call", async () => {
     extension(fake.api);
     await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
 
-    const first = await fake.emit("before_agent_start", { type: "before_agent_start" });
-    const second = await fake.emit("before_agent_start", { type: "before_agent_start" });
+    const first = await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
+    const second = await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
 
     assert.equal(first.message.customType, CUSTOM_MESSAGE_TYPE);
     assert.equal(first.message.display, true);
@@ -143,6 +243,54 @@ test("injects unconditional rules before first model call", async () => {
     assert.deepEqual(first.message.details.sources, [".agents/rules/base.md"]);
     assert.deepEqual(first.message.details.targets, { ".agents/rules/base.md": [] });
     assert.equal(second, undefined);
+  });
+});
+
+test("reads fresh rule content at each injection boundary", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(cwd, ".pi/rules/base.md", "Base v1");
+    await writeRule(cwd, ".pi/rules/scoped.md", "---\npaths: src/**\n---\nScoped v1");
+    const fake = createFakePi();
+    extension(fake.api);
+    await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
+
+    await writeRule(cwd, ".pi/rules/base.md", "Base v2");
+    const eager = await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
+    assert.match(eager.message.content, /Base v2/);
+    assert.doesNotMatch(eager.message.content, /Base v1/);
+
+    await fake.emit("tool_result", toolResult("read", "src/a.ts"), { cwd });
+    await writeRule(cwd, ".pi/rules/scoped.md", "---\npaths: src/**\n---\nScoped v2");
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
+    assert.match(fake.sent[0].message.content, /Scoped v2/);
+    assert.doesNotMatch(fake.sent[0].message.content, /Scoped v1/);
+  });
+});
+
+test("discovers new unconditional and matching path rules at turn end", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(cwd, ".pi/rules/seed.md", "---\npaths: never/**\n---\nSeed");
+    const fake = createFakePi();
+    extension(fake.api);
+    await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
+    const eager = await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
+    assert.equal(eager, undefined);
+
+    await writeRule(cwd, ".pi/rules/new-base.md", "New base rule");
+    await writeRule(cwd, ".pi/rules/new-path.md", "---\npaths: src/**\n---\nNew path rule");
+    await fake.emit("tool_result", toolResult("read", "src/new.ts"), { cwd });
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
+
+    assert.deepEqual(fake.sent[0].message.details.sources, [
+      ".pi/rules/new-base.md",
+      ".pi/rules/new-path.md",
+    ]);
+    assert.match(fake.sent[0].message.content, /New base rule/);
+    assert.match(fake.sent[0].message.content, /New path rule/);
+
+    await fake.emit("tool_result", toolResult("read", "src/again.ts"), { cwd });
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
+    assert.equal(fake.sent.length, 1);
   });
 });
 
@@ -164,7 +312,7 @@ test("parallel matches aggregate once without modifying tool results", async () 
 
     assert.deepEqual([first, second], before);
     assert.equal(fake.sent.length, 0);
-    await fake.emit("turn_end", { type: "turn_end" });
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
 
     assert.equal(fake.sent.length, 1);
     assert.deepEqual(fake.sent[0].options, { deliverAs: "steer" });
@@ -180,7 +328,7 @@ test("parallel matches aggregate once without modifying tool results", async () 
     assert.match(fake.sent[0].message.content, /TypeScript rule/);
 
     await fake.emit("tool_result", toolResult("read", "src/c.ts"), { cwd });
-    await fake.emit("turn_end", { type: "turn_end" });
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.equal(fake.sent.length, 1);
   });
 });
@@ -193,9 +341,27 @@ test("no path match produces no row or message", async () => {
     await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
 
     await fake.emit("tool_result", toolResult("read", "src/ui/button.ts"), { cwd });
-    await fake.emit("turn_end", { type: "turn_end" });
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
 
     assert.equal(fake.sent.length, 0);
+  });
+});
+
+test("separate extension instances inject independently for subagents", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(cwd, ".pi/rules/base.md", "Shared base rule");
+    const parent = createFakePi();
+    const subagent = createFakePi();
+    extension(parent.api);
+    extension(subagent.api);
+
+    await parent.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
+    await subagent.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
+    const parentInjection = await parent.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
+    const subagentInjection = await subagent.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
+
+    assert.match(parentInjection.message.content, /Shared base rule/);
+    assert.match(subagentInjection.message.content, /Shared base rule/);
   });
 });
 
@@ -219,10 +385,17 @@ test("renderer collapses to sources and expands targets plus full body", () => {
   };
   const theme = { fg: (_color, text) => text };
 
-  const collapsed = renderer(message, { expanded: false }, theme).render(200).join("\n").trimEnd();
+  const collapsed = renderer(message, { expanded: false }, theme)
+    .render(200)
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .trimEnd();
   const expanded = renderer(message, { expanded: true }, theme).render(200).join("\n").trimEnd();
 
-  assert.equal(collapsed, "↳ Rules: .agents/rules/auth.md, .agents/rules/typescript.md");
+  assert.equal(
+    collapsed,
+    "Loaded rules:\n↳ .agents/rules/auth.md\n↳ .agents/rules/typescript.md",
+  );
   assert.match(expanded, /\.agents\/rules\/auth\.md → src\/auth\.ts/);
   assert.match(expanded, /\.agents\/rules\/typescript\.md → unconditional/);
   assert.match(expanded, /Full body/);
@@ -236,19 +409,21 @@ test("compaction re-injects unconditional rules and permits lazy re-injection", 
     extension(fake.api);
     await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
 
-    await fake.emit("before_agent_start", { type: "before_agent_start" });
+    await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
     await fake.emit("tool_result", toolResult("read", "src/auth/user.ts"), { cwd });
-    await fake.emit("turn_end", { type: "turn_end" });
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.equal(fake.sent.length, 1);
 
-    await fake.emit("session_compact", { type: "session_compact", willRetry: true });
+    await writeRule(cwd, ".agents/rules/base.md", "Fresh base rule");
+    await fake.emit("session_compact", { type: "session_compact", willRetry: true }, { cwd });
     assert.equal(fake.sent.length, 2);
-    assert.match(fake.sent[1].message.content, /Base rule/);
+    assert.match(fake.sent[1].message.content, /Fresh base rule/);
     assert.equal(fake.sent[1].options, undefined);
 
+    await writeRule(cwd, ".agents/rules/auth.md", "---\npaths: src/auth/**\n---\nFresh auth rule");
     await fake.emit("tool_result", toolResult("read", "src/auth/session.ts"), { cwd });
-    await fake.emit("turn_end", { type: "turn_end" });
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.equal(fake.sent.length, 3);
-    assert.match(fake.sent[2].message.content, /Auth rule/);
+    assert.match(fake.sent[2].message.content, /Fresh auth rule/);
   });
 });

@@ -1,28 +1,104 @@
 import { readFile, readdir } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import Type from "typebox";
+import Schema from "typebox/schema";
 import { parseDocument } from "yaml";
 import type { DiscoveryResult, Rule, RuleDiagnostic } from "./types.js";
 
 const FRONTMATTER_RE = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const SUPPORTED_FIELDS = new Set(["paths"]);
 
+const RULE_SOURCE_SCHEMA = Type.Object({
+  scope: Type.Union([Type.Literal("repo"), Type.Literal("user")]),
+  kind: Type.Union([Type.Literal("pi"), Type.Literal("agents"), Type.Literal("claude")]),
+});
+
+export const RULE_CONFIG_SCHEMA = Type.Object({
+  sources: Type.Array(RULE_SOURCE_SCHEMA),
+});
+
+const RULE_CONFIG_VALIDATOR = Schema.Compile(RULE_CONFIG_SCHEMA);
+
+export type RuleSource = Type.Static<typeof RULE_SOURCE_SCHEMA>;
+export type RuleConfig = Type.Static<typeof RULE_CONFIG_SCHEMA>;
+
+export const DEFAULT_RULE_SOURCES: RuleSource[] = [
+  { scope: "repo", kind: "pi" },
+  { scope: "repo", kind: "agents" },
+  { scope: "repo", kind: "claude" },
+  { scope: "user", kind: "pi" },
+  { scope: "user", kind: "agents" },
+  { scope: "user", kind: "claude" },
+];
+
 interface RuleRoot {
   directory: string;
   label: string;
 }
 
+interface DiscoveryOptions {
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+  sources?: RuleSource[];
+}
+
+export interface RuleConfigResult {
+  sources: RuleSource[];
+  configPath?: string;
+  diagnostic?: RuleDiagnostic;
+}
+
 type ParseResult = { rule: Rule } | { diagnostic: RuleDiagnostic };
 
-export async function discoverRules(cwd: string): Promise<DiscoveryResult> {
-  const roots: RuleRoot[] = [
-    { directory: path.join(cwd, ".agents", "rules"), label: ".agents/rules" },
-    { directory: path.join(cwd, ".claude", "rules"), label: ".claude/rules" },
-  ];
-  const rules: Rule[] = [];
-  const diagnostics: RuleDiagnostic[] = [];
+export async function loadRuleConfig(cwd: string, options: DiscoveryOptions = {}): Promise<RuleConfigResult> {
+  const home = options.home ?? os.homedir();
+  const env = options.env ?? process.env;
+  const piCodingAgentDirectory = resolvePiCodingAgentDirectory(env, home);
+  const candidates = [path.join(cwd, ".pi", "rules.json"), path.join(piCodingAgentDirectory, "rules.json")];
+
+  for (const configPath of candidates) {
+    let content: string;
+    try {
+      content = await readFile(configPath, "utf8");
+    } catch (error) {
+      const code = getErrorCode(error);
+      if (code === "ENOENT") continue;
+      return invalidConfig(configPath, labelPath(configPath, cwd, home), `unreadable: ${code}`);
+    }
+
+    let value: unknown;
+    try {
+      value = JSON.parse(content);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return invalidConfig(configPath, labelPath(configPath, cwd, home), `invalid JSON: ${message}`);
+    }
+
+    if (!RULE_CONFIG_VALIDATOR.Check(value)) {
+      const [, errors] = RULE_CONFIG_VALIDATOR.Errors(value);
+      const first = errors[0];
+      const reason = first ? `${first.instancePath || "/"}: ${first.message}` : "schema validation failed";
+      return invalidConfig(configPath, labelPath(configPath, cwd, home), reason);
+    }
+
+    return { sources: value.sources, configPath };
+  }
+
+  return { sources: DEFAULT_RULE_SOURCES };
+}
+
+export async function discoverRules(cwd: string, options: DiscoveryOptions = {}): Promise<DiscoveryResult> {
+  const home = options.home ?? os.homedir();
+  const env = options.env ?? process.env;
+  const roots = (options.sources ?? DEFAULT_RULE_SOURCES).map((source) => resolveRuleRoot(source, cwd, env, home));
 
   for (const root of roots) {
     const files = await findMarkdownFiles(root.directory);
+    if (files.length === 0) continue;
+
+    const rules: Rule[] = [];
+    const diagnostics: RuleDiagnostic[] = [];
     for (const relativePath of files) {
       const sourcePath = path.join(root.directory, ...relativePath.split("/"));
       const sourceLabel = `${root.label}/${relativePath}`;
@@ -33,9 +109,10 @@ export async function discoverRules(cwd: string): Promise<DiscoveryResult> {
         diagnostics.push(parsed.diagnostic);
       }
     }
+    return { rules, diagnostics };
   }
 
-  return { rules, diagnostics };
+  return { rules: [], diagnostics: [] };
 }
 
 export async function parseRuleFile(sourcePath: string, sourceLabel: string): Promise<ParseResult> {
@@ -130,6 +207,39 @@ async function findMarkdownFiles(directory: string): Promise<string[]> {
   return files;
 }
 
+function resolvePiCodingAgentDirectory(env: NodeJS.ProcessEnv, home: string): string {
+  return env.PI_CODING_AGENT_DIR || path.join(env.PI_CONFIG_DIR || path.join(home, ".pi"), "agent");
+}
+
+function resolveRuleRoot(source: RuleSource, cwd: string, env: NodeJS.ProcessEnv, home: string): RuleRoot {
+  if (source.scope === "repo") {
+    return { directory: path.join(cwd, `.${source.kind}`, "rules"), label: `.${source.kind}/rules` };
+  }
+
+  if (source.kind === "pi") {
+    const directory = path.join(resolvePiCodingAgentDirectory(env, home), "rules");
+    return { directory, label: labelDirectory(directory, home) };
+  }
+  if (source.kind === "agents") {
+    return { directory: path.join(home, ".agents", "rules"), label: "~/.agents/rules" };
+  }
+
+  const directory = path.join(env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), "rules");
+  return { directory, label: labelDirectory(directory, home) };
+}
+
+function invalidConfig(configPath: string, sourceLabel: string, reason: string): RuleConfigResult {
+  return { sources: [], configPath, diagnostic: { sourceLabel, reason } };
+}
+
+function labelPath(target: string, cwd: string, home: string): string {
+  const relative = path.relative(cwd, target);
+  if (relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+    return relative.split(path.sep).join("/");
+  }
+  return labelDirectory(target, home);
+}
+
 function normalizePaths(raw: unknown): string[] | { reason: string } | undefined {
   if (raw === undefined) return undefined;
   const values = typeof raw === "string" ? [raw] : raw;
@@ -141,6 +251,14 @@ function normalizePaths(raw: unknown): string[] | { reason: string } | undefined
     return { reason: "paths must contain at least one non-empty glob" };
   }
   return normalized;
+}
+
+function labelDirectory(directory: string, home: string): string {
+  const relative = path.relative(home, directory);
+  if (relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+    return `~/${relative.split(path.sep).join("/")}`;
+  }
+  return directory.split(path.sep).join("/");
 }
 
 function getErrorCode(error: unknown): string {

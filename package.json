@@ -33,11 +33,13 @@
     "@earendil-works/pi-tui": "0.81.1",
     "@types/node": "24.3.0",
     "@types/picomatch": "4.0.2",
+    "typebox": "1.1.38",
     "typescript": "5.7.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "engines": {
     "node": ">=20.6.0"

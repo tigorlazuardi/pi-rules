@@ -1,6 +1,7 @@
-import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { discoverRules } from "./discovery.js";
+import { DEFAULT_RULE_SOURCES, discoverRules, loadRuleConfig } from "./discovery.js";
+import type { RuleSource } from "./discovery.js";
 import { extractTarget, ruleMatchesTarget } from "./matching.js";
 import type { PendingRule, Rule, RuleInjectionDetails } from "./types.js";
 
@@ -9,12 +10,14 @@ export const CUSTOM_MESSAGE_TYPE = "pi-rules-injection";
 export function makeExtension() {
   return (pi: ExtensionAPI): void => {
     let rules: Rule[] = [];
+    let sources: RuleSource[] = DEFAULT_RULE_SOURCES;
     const injectedRuleIds = new Set<string>();
-    const pendingByRule = new Map<string, PendingRule>();
+    const turnTargets = new Set<string>();
 
     pi.registerMessageRenderer<RuleInjectionDetails>(CUSTOM_MESSAGE_TYPE, (message, { expanded }, theme) => {
       const details = message.details;
-      const summary = `↳ Rules: ${details?.sources.join(", ") ?? "(unknown)"}`;
+      const sourceLines = (details?.sources ?? ["(unknown)"]).map((source) => `↳ ${source}`).join("\n");
+      const summary = `Loaded rules:\n${sourceLines}`;
       if (!expanded) {
         return new Text(theme.fg("muted", summary), 0, 0);
       }
@@ -26,20 +29,38 @@ export function makeExtension() {
         })
         .join("\n");
       const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2);
-      return new Text(`${theme.fg("accent", summary)}\n${theme.fg("dim", targetLines ?? "")}\n\n${content}`, 0, 0);
+      return new Text(
+        `${theme.fg("accent", "Loaded rules:")}\n${theme.fg("muted", sourceLines)}\n\n${theme.fg("dim", targetLines ?? "")}\n\n${content}`,
+        0,
+        0,
+      );
     });
 
-    pi.on("session_start", async (_event, ctx) => {
-      const discovery = await discoverRules(ctx.cwd);
-      rules = discovery.rules;
-      injectedRuleIds.clear();
-      pendingByRule.clear();
+    const reloadConfig = async (cwd: string): Promise<void> => {
+      const result = await loadRuleConfig(cwd);
+      sources = result.sources;
+      if (result.diagnostic) {
+        process.stderr.write(`[pi-rules] invalid config ${result.diagnostic.sourceLabel}: ${result.diagnostic.reason}\n`);
+      }
+    };
+
+    const reloadRules = async (cwd: string): Promise<Rule[]> => {
+      const discovery = await discoverRules(cwd, { sources });
       for (const diagnostic of discovery.diagnostics) {
         process.stderr.write(`[pi-rules] skipped ${diagnostic.sourceLabel}: ${diagnostic.reason}\n`);
       }
+      return discovery.rules;
+    };
+
+    pi.on("session_start", async (_event, ctx) => {
+      await reloadConfig(ctx.cwd);
+      rules = await reloadRules(ctx.cwd);
+      injectedRuleIds.clear();
+      turnTargets.clear();
     });
 
-    pi.on("before_agent_start", () => {
+    pi.on("before_agent_start", async (_event, ctx) => {
+      rules = await reloadRules(ctx.cwd);
       const unconditional = freshUnconditionalRules(rules, injectedRuleIds);
       if (unconditional.length === 0) return;
       const injection = createInjection(unconditional.map((rule) => ({ rule, targets: new Set<string>() })));
@@ -48,21 +69,31 @@ export function makeExtension() {
     });
 
     pi.on("tool_result", (event, ctx) => {
-      collectMatches(event, ctx.cwd, rules, injectedRuleIds, pendingByRule);
+      const target = extractTarget(event, ctx.cwd);
+      if (target) turnTargets.add(target);
     });
 
-    pi.on("turn_end", () => {
-      if (pendingByRule.size === 0) return;
-      const pending = [...pendingByRule.values()].sort(comparePendingRules);
-      const injection = createInjection(pending);
-      pi.sendMessage(injection, { deliverAs: "steer" });
+    pi.on("turn_end", async (_event, ctx) => {
+      rules = await reloadRules(ctx.cwd);
+      const pending = rules
+        .flatMap((rule) => {
+          if (injectedRuleIds.has(rule.id)) return [];
+          if (!rule.paths) return [{ rule, targets: new Set<string>() }];
+          const targets = new Set([...turnTargets].filter((target) => ruleMatchesTarget(rule, target)));
+          return targets.size > 0 ? [{ rule, targets }] : [];
+        })
+        .sort(comparePendingRules);
+      turnTargets.clear();
+      if (pending.length === 0) return;
+      pi.sendMessage(createInjection(pending), { deliverAs: "steer" });
       for (const entry of pending) injectedRuleIds.add(entry.rule.id);
-      pendingByRule.clear();
     });
 
-    pi.on("session_compact", () => {
+    pi.on("session_compact", async (_event, ctx) => {
       injectedRuleIds.clear();
-      pendingByRule.clear();
+      turnTargets.clear();
+      await reloadConfig(ctx.cwd);
+      rules = await reloadRules(ctx.cwd);
       const unconditional = freshUnconditionalRules(rules, injectedRuleIds);
       if (unconditional.length === 0) return;
       const entries = unconditional.map((rule) => ({ rule, targets: new Set<string>() }));
@@ -70,27 +101,6 @@ export function makeExtension() {
       for (const rule of unconditional) injectedRuleIds.add(rule.id);
     });
   };
-}
-
-export function collectMatches(
-  event: ToolResultEvent,
-  cwd: string,
-  rules: Rule[],
-  injectedRuleIds: Set<string>,
-  pendingByRule: Map<string, PendingRule>,
-): void {
-  const target = extractTarget(event, cwd);
-  if (!target) return;
-
-  for (const rule of rules) {
-    if (!rule.paths || injectedRuleIds.has(rule.id) || !ruleMatchesTarget(rule, target)) continue;
-    const existing = pendingByRule.get(rule.id);
-    if (existing) {
-      existing.targets.add(target);
-    } else {
-      pendingByRule.set(rule.id, { rule, targets: new Set([target]) });
-    }
-  }
 }
 
 export function createInjection(entries: PendingRule[]) {
