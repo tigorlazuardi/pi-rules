@@ -158,17 +158,26 @@ export async function parseRuleFile(sourcePath: string, sourceLabel: string): Pr
     };
   }
 
-  const document = parseDocument(frontmatter[1] ?? "", { logLevel: "silent" });
-  if (document.errors.length > 0) {
+  let raw: unknown;
+  try {
+    const document = parseDocument(frontmatter[1] ?? "", { logLevel: "silent" });
+    if (document.errors.length > 0) {
+      return {
+        diagnostic: {
+          sourceLabel,
+          reason: `invalid YAML: ${document.errors[0]?.message ?? "unknown error"}`,
+        },
+      };
+    }
+    raw = document.toJS();
+  } catch (error) {
     return {
       diagnostic: {
         sourceLabel,
-        reason: `invalid YAML: ${document.errors[0]?.message ?? "unknown error"}`,
+        reason: `invalid YAML: ${error instanceof Error ? error.message : String(error)}`,
       },
     };
   }
-
-  const raw = document.toJS();
   if (raw !== null && (typeof raw !== "object" || Array.isArray(raw))) {
     return { diagnostic: { sourceLabel, reason: "frontmatter must be a mapping" } };
   }

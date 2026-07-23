@@ -234,6 +234,27 @@ test("accepts path lists and diagnoses unsupported or malformed frontmatter", as
   });
 });
 
+test("warns and skips non-string paths without blocking valid sibling rules", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(cwd, ".pi/rules/bad-object.md", "---\npaths:\n  include: src/**\n---\nBad object");
+    await writeRule(cwd, ".pi/rules/bad-list.md", "---\npaths: [src/**, 42]\n---\nBad list");
+    await writeRule(cwd, ".pi/rules/valid.md", "Valid sibling");
+    const warnings = [];
+    const ctx = { cwd, hasUI: true, ui: { notify: (message, level) => warnings.push({ message, level }) } };
+    const fake = createFakePi();
+    extension(fake.api);
+
+    await fake.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const injection = await fake.emit("before_agent_start", { type: "before_agent_start" }, ctx);
+
+    assert.match(injection.message.content, /Valid sibling/);
+    assert.doesNotMatch(injection.message.content, /Bad object|Bad list/);
+    assert.equal(warnings.every(({ level }) => level === "warning"), true);
+    assert.equal(warnings.some(({ message }) => /bad-object\.md: paths must be a string or string list/.test(message)), true);
+    assert.equal(warnings.some(({ message }) => /bad-list\.md: paths must be a string or string list/.test(message)), true);
+  });
+});
+
 test("extracts only successful project-local read/edit/write targets", () => {
   const cwd = path.resolve("/workspace/project");
   assert.equal(extractTarget(toolResult("read", "@src/a.ts"), cwd), "src/a.ts");

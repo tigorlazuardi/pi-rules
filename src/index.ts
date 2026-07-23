@@ -27,7 +27,7 @@ export function makeExtension() {
     };
     let rules: Rule[] = [];
     let pendingRuleNudge = false;
-    let reportConfigError = (message: string): void => {
+    let reportWarning = (message: string): void => {
       process.stderr.write(`${message}\n`);
     };
     const injectedRuleIds = new Set<string>();
@@ -36,7 +36,7 @@ export function makeExtension() {
     const stopConfigListener = pi.events.on(CONFIG_EVENT, (value) => {
       const validation = validateRuleConfigPatch(value);
       if ("reason" in validation) {
-        reportConfigError(`[pi-rules] rejected ${CONFIG_EVENT}: ${validation.reason}`);
+        reportWarning(`[pi-rules] rejected ${CONFIG_EVENT}: ${validation.reason}`);
         return;
       }
       config = { ...config, ...validation.config };
@@ -84,20 +84,20 @@ export function makeExtension() {
         nudges: { afterCommit: result.nudgeAfterCommit },
       };
       if (result.diagnostic) {
-        reportConfigError(`[pi-rules] invalid config ${result.diagnostic.sourceLabel}: ${result.diagnostic.reason}`);
+        reportWarning(`[pi-rules] invalid config ${result.diagnostic.sourceLabel}: ${result.diagnostic.reason}`);
       }
     };
 
     const reloadRules = async (cwd: string): Promise<Rule[]> => {
       const discovery = await discoverRules(cwd, { sources: config.sources ?? DEFAULT_RULE_SOURCES });
       for (const diagnostic of discovery.diagnostics) {
-        process.stderr.write(`[pi-rules] skipped ${diagnostic.sourceLabel}: ${diagnostic.reason}\n`);
+        reportWarning(`[pi-rules] skipped ${diagnostic.sourceLabel}: ${diagnostic.reason}`);
       }
       return discovery.rules;
     };
 
     pi.on("session_start", async (_event, ctx) => {
-      reportConfigError = ctx.hasUI
+      reportWarning = ctx.hasUI
         ? (message) => ctx.ui.notify(message, "warning")
         : (message) => process.stderr.write(`${message}\n`);
       await reloadConfig(ctx.cwd);
