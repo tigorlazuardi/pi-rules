@@ -1,5 +1,5 @@
 {
-  "name": "pi-rules",
+  "name": "@tigorhutasuhut/pi-rules",
   "version": "0.2.0",
   "description": "Claude-compatible project rules for Pi agents and subagents",
   "type": "module",
@@ -52,6 +52,16 @@
     "claude-code"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tigorlazuardi/pi-rules.git"
+  },
+  "homepage": "https://github.com/tigorlazuardi/pi-rules#readme",
+  "bugs": "https://github.com/tigorlazuardi/pi-rules/issues",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "pi": {
     "extensions": [
       "./dist/index.js"

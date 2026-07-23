@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { discoverRules, loadRuleConfig, parseRuleFile } from "../dist/discovery.js";
-import extension, { CUSTOM_MESSAGE_TYPE } from "../dist/index.js";
+import extension, {
+  CUSTOM_MESSAGE_TYPE,
+  CONFIG_EVENT,
+  NUDGE_MESSAGE_TYPE,
+  emitPiRulesConfig,
+  isSuccessfulGitCommit,
+} from "../dist/index.js";
 import { extractTarget, ruleMatchesTarget } from "../dist/matching.js";
 
 async function withTempDirectory(run) {
@@ -24,10 +30,22 @@ async function writeRule(cwd, relativePath, content) {
 
 function createFakePi() {
   const handlers = new Map();
+  const customHandlers = new Map();
   const renderers = new Map();
   const sent = [];
   return {
     api: {
+      events: {
+        on(event, handler) {
+          const eventHandlers = customHandlers.get(event) ?? [];
+          eventHandlers.push(handler);
+          customHandlers.set(event, eventHandlers);
+          return () => customHandlers.set(event, eventHandlers.filter((candidate) => candidate !== handler));
+        },
+        emit(event, value) {
+          for (const handler of customHandlers.get(event) ?? []) handler(value);
+        },
+      },
       on(event, handler) {
         const eventHandlers = handlers.get(event) ?? [];
         eventHandlers.push(handler);
@@ -64,6 +82,10 @@ function toolResult(toolName, filePath, overrides = {}) {
     isError: false,
     ...overrides,
   };
+}
+
+function bashResult(command, overrides = {}) {
+  return toolResult("bash", undefined, { input: { command }, ...overrides });
 }
 
 test("uses first non-empty rule root and sorts nested files", async () => {
@@ -149,7 +171,12 @@ test("loads user config from resolved Pi coding-agent directory", async () => {
     await writeRule(
       root,
       "pi-config/agent/rules.json",
-      JSON.stringify({ version: 1, sources: [{ scope: "user", kind: "agents" }] }),
+      JSON.stringify({
+        version: 1,
+        enabled: false,
+        sources: [{ scope: "user", kind: "agents" }],
+        nudges: { afterCommit: true, future: "allowed" },
+      }),
     );
     await writeRule(root, "home/.agents/rules/user.md", "User agents rule");
 
@@ -157,6 +184,8 @@ test("loads user config from resolved Pi coding-agent directory", async () => {
     const result = await discoverRules(cwd, { home, env: { PI_CONFIG_DIR: piConfig }, sources: config.sources });
 
     assert.equal(config.configPath, path.join(piConfig, "agent", "rules.json"));
+    assert.equal(config.enabled, false);
+    assert.equal(config.nudgeAfterCommit, true);
     assert.deepEqual(result.rules.map((rule) => rule.body), ["User agents rule"]);
   });
 });
@@ -212,6 +241,14 @@ test("extracts only successful project-local read/edit/write targets", () => {
   assert.equal(extractTarget(toolResult("write", "../outside.ts"), cwd), undefined);
   assert.equal(extractTarget(toolResult("bash", "src/a.ts"), cwd), undefined);
   assert.equal(extractTarget(toolResult("read", "src/a.ts", { isError: true }), cwd), undefined);
+});
+
+test("recognizes successful direct git commit commands", () => {
+  assert.equal(isSuccessfulGitCommit(bashResult("git commit -m 'feat: ship'")), true);
+  assert.equal(isSuccessfulGitCommit(bashResult("rtk git commit -m 'feat: ship' && rtk git push")), true);
+  assert.equal(isSuccessfulGitCommit(bashResult("cd repo && git -C nested commit --amend")), true);
+  assert.equal(isSuccessfulGitCommit(bashResult("git status")), false);
+  assert.equal(isSuccessfulGitCommit(bashResult("git commit -m nope", { isError: true })), false);
 });
 
 test("matches Claude-style project-relative globs including dotfiles", () => {
@@ -347,7 +384,91 @@ test("no path match produces no row or message", async () => {
   });
 });
 
-test("separate extension instances inject independently for subagents", async () => {
+test("nudges only after a successful commit settles", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(
+      cwd,
+      ".pi/rules.json",
+      JSON.stringify({ sources: [], nudges: { afterCommit: true } }),
+    );
+    const fake = createFakePi();
+    extension(fake.api);
+    await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
+
+    await fake.emit("tool_result", bashResult("rtk git commit -m 'feat: ship'"), { cwd });
+    assert.equal(fake.sent.length, 0);
+    await fake.emit("agent_settled", { type: "agent_settled" }, { cwd });
+
+    assert.equal(fake.sent.length, 1);
+    assert.equal(fake.sent[0].message.customType, NUDGE_MESSAGE_TYPE);
+    assert.equal(fake.sent[0].message.display, true);
+    assert.match(fake.sent[0].message.content, /durable, repository-specific convention/);
+    assert.deepEqual(fake.sent[0].options, { deliverAs: "followUp", triggerTurn: true });
+
+    await fake.emit("agent_settled", { type: "agent_settled" }, { cwd });
+    assert.equal(fake.sent.length, 1);
+  });
+});
+
+test("config event shallow-merges valid patches and rejects invalid updates", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(
+      cwd,
+      ".pi/rules.json",
+      JSON.stringify({ sources: [], nudges: { afterCommit: true } }),
+    );
+    const fake = createFakePi();
+    const notices = [];
+    const ctx = { cwd, hasUI: true, ui: { notify: (message, level) => notices.push({ message, level }) } };
+    extension(fake.api);
+    await fake.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await fake.emit("tool_result", bashResult("git commit -m first"), ctx);
+
+    emitPiRulesConfig(fake.api, { enabled: false });
+    fake.api.events.emit(CONFIG_EVENT, { enabled: "true" });
+    await fake.emit("agent_settled", { type: "agent_settled" }, ctx);
+    await fake.emit("tool_result", bashResult("git commit -m suppressed"), ctx);
+    await fake.emit("agent_settled", { type: "agent_settled" }, ctx);
+    assert.equal(fake.sent.length, 0);
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0].level, "warning");
+    assert.match(notices[0].message, /rejected pi-rules:config/);
+
+    fake.api.events.emit(CONFIG_EVENT, { enabled: true });
+    await fake.emit("tool_result", bashResult("git commit -m enabled"), ctx);
+    await fake.emit("agent_settled", { type: "agent_settled" }, { cwd });
+    assert.equal(fake.sent.length, 1);
+    assert.equal(fake.sent[0].message.customType, NUDGE_MESSAGE_TYPE);
+  });
+});
+
+test("disabled config suppresses rule injection until re-enabled", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(cwd, ".pi/rules.json", JSON.stringify({ sources: [{ scope: "repo", kind: "pi" }], nudges: { afterCommit: true } }));
+    await writeRule(cwd, ".pi/rules/base.md", "Shared base rule");
+    await writeRule(cwd, ".claude/rules/base.md", "Claude base rule");
+    const fake = createFakePi();
+    extension(fake.api);
+    await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
+    emitPiRulesConfig(fake.api, {
+      enabled: false,
+      sources: [{ scope: "repo", kind: "claude" }],
+      nudges: { afterCommit: false },
+    });
+    const disabled = await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
+    assert.equal(disabled, undefined);
+
+    emitPiRulesConfig(fake.api, { enabled: true });
+    const enabled = await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
+    assert.match(enabled.message.content, /Claude base rule/);
+    assert.doesNotMatch(enabled.message.content, /Shared base rule/);
+    await fake.emit("tool_result", bashResult("git commit -m no-nudge"), { cwd });
+    await fake.emit("agent_settled", { type: "agent_settled" }, { cwd });
+    assert.equal(fake.sent.length, 0);
+  });
+});
+
+test("separate extension instances inject independently", async () => {
   await withTempDirectory(async (cwd) => {
     await writeRule(cwd, ".pi/rules/base.md", "Shared base rule");
     const parent = createFakePi();

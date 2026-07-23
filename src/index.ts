@@ -1,18 +1,51 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { DEFAULT_RULE_SOURCES, discoverRules, loadRuleConfig } from "./discovery.js";
-import type { RuleSource } from "./discovery.js";
+import { DEFAULT_RULE_SOURCES, discoverRules, loadRuleConfig, validateRuleConfigPatch } from "./discovery.js";
+import type { RuleConfigPatch } from "./discovery.js";
 import { extractTarget, ruleMatchesTarget } from "./matching.js";
 import type { PendingRule, Rule, RuleInjectionDetails } from "./types.js";
 
 export const CUSTOM_MESSAGE_TYPE = "pi-rules-injection";
+export const NUDGE_MESSAGE_TYPE = "pi-rules-nudge";
+export const CONFIG_EVENT = "pi-rules:config";
+
+export function emitPiRulesConfig(
+  pi: Pick<ExtensionAPI, "events">,
+  config: RuleConfigPatch,
+): void {
+  pi.events.emit(CONFIG_EVENT, config);
+}
+
+const NUDGE_CONTENT = `A successful git commit just completed. Review the committed work for a durable, repository-specific convention that future agents would otherwise miss. If one exists, create or update the smallest appropriate rule and prefer paths frontmatter when its scope is limited. Do nothing when no durable rule is warranted. Do not commit or push changes created by this nudge.`;
 
 export function makeExtension() {
   return (pi: ExtensionAPI): void => {
+    let config: RuleConfigPatch = {
+      enabled: true,
+      sources: DEFAULT_RULE_SOURCES,
+      nudges: { afterCommit: false },
+    };
     let rules: Rule[] = [];
-    let sources: RuleSource[] = DEFAULT_RULE_SOURCES;
+    let pendingRuleNudge = false;
+    let reportConfigError = (message: string): void => {
+      process.stderr.write(`${message}\n`);
+    };
     const injectedRuleIds = new Set<string>();
     const turnTargets = new Set<string>();
+
+    const stopConfigListener = pi.events.on(CONFIG_EVENT, (value) => {
+      const validation = validateRuleConfigPatch(value);
+      if ("reason" in validation) {
+        reportConfigError(`[pi-rules] rejected ${CONFIG_EVENT}: ${validation.reason}`);
+        return;
+      }
+      config = { ...config, ...validation.config };
+      if (config.enabled === false) {
+        pendingRuleNudge = false;
+        turnTargets.clear();
+      }
+    });
+    pi.on("session_shutdown", stopConfigListener);
 
     pi.registerMessageRenderer<RuleInjectionDetails>(CUSTOM_MESSAGE_TYPE, (message, { expanded }, theme) => {
       const details = message.details;
@@ -36,16 +69,27 @@ export function makeExtension() {
       );
     });
 
+    pi.registerMessageRenderer(NUDGE_MESSAGE_TYPE, (message, { expanded }, theme) => {
+      const summary = "Rule nudge: review committed work";
+      if (!expanded) return new Text(theme.fg("muted", summary), 0, 0);
+      const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2);
+      return new Text(`${theme.fg("accent", summary)}\n\n${content}`, 0, 0);
+    });
+
     const reloadConfig = async (cwd: string): Promise<void> => {
       const result = await loadRuleConfig(cwd);
-      sources = result.sources;
+      config = {
+        enabled: result.enabled,
+        sources: result.sources,
+        nudges: { afterCommit: result.nudgeAfterCommit },
+      };
       if (result.diagnostic) {
-        process.stderr.write(`[pi-rules] invalid config ${result.diagnostic.sourceLabel}: ${result.diagnostic.reason}\n`);
+        reportConfigError(`[pi-rules] invalid config ${result.diagnostic.sourceLabel}: ${result.diagnostic.reason}`);
       }
     };
 
     const reloadRules = async (cwd: string): Promise<Rule[]> => {
-      const discovery = await discoverRules(cwd, { sources });
+      const discovery = await discoverRules(cwd, { sources: config.sources ?? DEFAULT_RULE_SOURCES });
       for (const diagnostic of discovery.diagnostics) {
         process.stderr.write(`[pi-rules] skipped ${diagnostic.sourceLabel}: ${diagnostic.reason}\n`);
       }
@@ -53,13 +97,18 @@ export function makeExtension() {
     };
 
     pi.on("session_start", async (_event, ctx) => {
+      reportConfigError = ctx.hasUI
+        ? (message) => ctx.ui.notify(message, "warning")
+        : (message) => process.stderr.write(`${message}\n`);
       await reloadConfig(ctx.cwd);
-      rules = await reloadRules(ctx.cwd);
+      rules = config.enabled !== false ? await reloadRules(ctx.cwd) : [];
+      pendingRuleNudge = false;
       injectedRuleIds.clear();
       turnTargets.clear();
     });
 
     pi.on("before_agent_start", async (_event, ctx) => {
+      if (config.enabled === false) return;
       rules = await reloadRules(ctx.cwd);
       const unconditional = freshUnconditionalRules(rules, injectedRuleIds);
       if (unconditional.length === 0) return;
@@ -69,11 +118,27 @@ export function makeExtension() {
     });
 
     pi.on("tool_result", (event, ctx) => {
+      if (config.enabled === false) return;
       const target = extractTarget(event, ctx.cwd);
       if (target) turnTargets.add(target);
+      if (config.nudges?.afterCommit && isSuccessfulGitCommit(event)) pendingRuleNudge = true;
+    });
+
+    pi.on("agent_settled", () => {
+      if (!pendingRuleNudge) return;
+      pendingRuleNudge = false;
+      if (config.enabled === false || !config.nudges?.afterCommit) return;
+      pi.sendMessage(
+        { customType: NUDGE_MESSAGE_TYPE, content: NUDGE_CONTENT, display: true },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
     });
 
     pi.on("turn_end", async (_event, ctx) => {
+      if (config.enabled === false) {
+        turnTargets.clear();
+        return;
+      }
       rules = await reloadRules(ctx.cwd);
       const pending = rules
         .flatMap((rule) => {
@@ -93,6 +158,10 @@ export function makeExtension() {
       injectedRuleIds.clear();
       turnTargets.clear();
       await reloadConfig(ctx.cwd);
+      if (config.enabled === false) {
+        rules = [];
+        return;
+      }
       rules = await reloadRules(ctx.cwd);
       const unconditional = freshUnconditionalRules(rules, injectedRuleIds);
       if (unconditional.length === 0) return;
@@ -101,6 +170,14 @@ export function makeExtension() {
       for (const rule of unconditional) injectedRuleIds.add(rule.id);
     });
   };
+}
+
+export function isSuccessfulGitCommit(event: ToolResultEvent): boolean {
+  if (event.toolName !== "bash" || event.isError) return false;
+  const command = event.input.command;
+  if (typeof command !== "string") return false;
+  // ponytail: recognize direct git/rtk commands; compare HEAD if alias and wrapper support becomes necessary.
+  return /(?:^|(?:&&|\|\||[;\n(])\s*)(?:rtk\s+)?git(?:\s+-C\s+(?:"[^"]*"|'[^']*'|\S+))?\s+commit(?:\s|$)/.test(command);
 }
 
 export function createInjection(entries: PendingRule[]) {
