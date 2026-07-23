@@ -7,7 +7,6 @@ import { parseDocument } from "yaml";
 import type { DiscoveryResult, Rule, RuleDiagnostic } from "./types.js";
 
 const FRONTMATTER_RE = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
-const SUPPORTED_FIELDS = new Set(["paths"]);
 
 const RULE_SOURCE_SCHEMA = Type.Object({
   scope: Type.Union([Type.Literal("repo"), Type.Literal("user")]),
@@ -183,16 +182,6 @@ export async function parseRuleFile(sourcePath: string, sourceLabel: string): Pr
   }
 
   const record = (raw ?? {}) as Record<string, unknown>;
-  const unsupported = Object.keys(record).filter((field) => !SUPPORTED_FIELDS.has(field));
-  if (unsupported.length > 0) {
-    return {
-      diagnostic: {
-        sourceLabel,
-        reason: `unsupported frontmatter field${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}`,
-      },
-    };
-  }
-
   const paths = normalizePaths(record.paths);
   if (paths && "reason" in paths) {
     return { diagnostic: { sourceLabel, reason: paths.reason } };

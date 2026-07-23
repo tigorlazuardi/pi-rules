@@ -215,21 +215,21 @@ test("warns without crashing when config fails TypeBox validation", async () => 
   });
 });
 
-test("accepts path lists and diagnoses unsupported or malformed frontmatter", async () => {
+test("accepts path lists, ignores unknown fields, and diagnoses malformed frontmatter", async () => {
   await withTempDirectory(async (cwd) => {
     const valid = path.join(cwd, "valid.md");
-    const unsupported = path.join(cwd, "unsupported.md");
+    const extra = path.join(cwd, "extra.md");
     const malformed = path.join(cwd, "malformed.md");
     await writeFile(valid, "---\npaths:\n  - src/**/*.ts\n  - tests/**\n---\nTyped", "utf8");
-    await writeFile(unsupported, "---\ndescription: old schema\n---\nOld", "utf8");
+    await writeFile(extra, "---\ndescription: old schema\nalwaysApply: true\n---\nOld", "utf8");
     await writeFile(malformed, "---\npaths: [src/**\n---\nBad", "utf8");
 
     const validResult = await parseRuleFile(valid, "valid.md");
-    const unsupportedResult = await parseRuleFile(unsupported, "unsupported.md");
+    const extraResult = await parseRuleFile(extra, "extra.md");
     const malformedResult = await parseRuleFile(malformed, "malformed.md");
 
     assert.deepEqual(validResult.rule.paths, ["src/**/*.ts", "tests/**"]);
-    assert.match(unsupportedResult.diagnostic.reason, /unsupported frontmatter field: description/);
+    assert.equal(extraResult.rule.body, "Old");
     assert.match(malformedResult.diagnostic.reason, /invalid YAML/);
   });
 });
