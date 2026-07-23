@@ -1,6 +1,6 @@
 {
   "name": "@tigorhutasuhut/pi-rules",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Claude-compatible project rules for Pi agents and subagents",
   "type": "module",
   "main": "dist/index.js",
@@ -21,7 +21,8 @@
     "build": "npm run clean && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test test/*.test.js",
-    "check": "npm run typecheck && npm test",
+    "check:pack": "npm pack --dry-run --json --ignore-scripts | node -e \"let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const [{files}]=JSON.parse(s);if(!files.some(f=>f.path==='dist/index.js'))throw new Error('dist/index.js missing from npm package')})\"",
+    "check": "npm run typecheck && npm test && npm run check:pack",
     "prepack": "npm run build"
   },
   "dependencies": {
