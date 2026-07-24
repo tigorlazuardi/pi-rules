@@ -18,6 +18,22 @@ pi install -l npm:@tigorhutasuhut/pi-rules
 
 Already running Pi? Use `/reload` after installation.
 
+Try without installing:
+
+```sh
+pi -e npm:@tigorhutasuhut/pi-rules
+```
+
+Pin, update, or remove the package:
+
+```sh
+pi install npm:@tigorhutasuhut/pi-rules@0.3.1
+pi update npm:@tigorhutasuhut/pi-rules
+pi remove npm:@tigorhutasuhut/pi-rules
+```
+
+Versioned installs stay pinned during `pi update --extensions` and `pi update --all`. Use the unversioned install command again to resume package updates.
+
 ## Quick start
 
 Create `.pi/rules/project.md` in your repository:
