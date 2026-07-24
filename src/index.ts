@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import { readFile } from "node:fs/promises";
+import { stripFrontmatter, type ExtensionAPI, type Skill, type ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { DEFAULT_RULE_SOURCES, discoverRules, loadRuleConfig, validateRuleConfigPatch } from "./discovery.js";
 import type { RuleConfigPatch } from "./discovery.js";
@@ -31,6 +32,8 @@ export function makeExtension() {
       process.stderr.write(`${message}\n`);
     };
     const injectedRuleIds = new Set<string>();
+    const injectedSkillNames = new Set<string>();
+    const availableSkills = new Map<string, Skill>();
     const turnTargets = new Set<string>();
 
     const stopConfigListener = pi.events.on(CONFIG_EVENT, (value) => {
@@ -50,7 +53,8 @@ export function makeExtension() {
     pi.registerMessageRenderer<RuleInjectionDetails>(CUSTOM_MESSAGE_TYPE, (message, { expanded }, theme) => {
       const details = message.details;
       const sourceLines = (details?.sources ?? ["(unknown)"]).map((source) => `↳ ${source}`).join("\n");
-      const summary = `Loaded rules:\n${sourceLines}`;
+      const skillLines = (details?.skills ?? []).map((skill) => `↳ ${skill}`).join("\n");
+      const summary = `Loaded rules:\n${sourceLines}${skillLines ? `\nLoaded skills:\n${skillLines}` : ""}`;
       if (!expanded) {
         return new Text(theme.fg("muted", summary), 0, 0);
       }
@@ -96,6 +100,12 @@ export function makeExtension() {
       return discovery.rules;
     };
 
+    const createRuleInjection = async (entries: PendingRule[]) => {
+      const skillBlocks = await loadSkillBlocks(entries, availableSkills, injectedSkillNames, reportWarning);
+      for (const skill of skillBlocks) injectedSkillNames.add(skill.name);
+      return createInjection(entries, skillBlocks);
+    };
+
     pi.on("session_start", async (_event, ctx) => {
       reportWarning = ctx.hasUI
         ? (message) => ctx.ui.notify(message, "warning")
@@ -104,15 +114,19 @@ export function makeExtension() {
       rules = config.enabled !== false ? await reloadRules(ctx.cwd) : [];
       pendingRuleNudge = false;
       injectedRuleIds.clear();
+      injectedSkillNames.clear();
+      availableSkills.clear();
       turnTargets.clear();
     });
 
-    pi.on("before_agent_start", async (_event, ctx) => {
+    pi.on("before_agent_start", async (event, ctx) => {
+      availableSkills.clear();
+      for (const skill of event.systemPromptOptions?.skills ?? []) availableSkills.set(skill.name, skill);
       if (config.enabled === false) return;
       rules = await reloadRules(ctx.cwd);
       const unconditional = freshUnconditionalRules(rules, injectedRuleIds);
       if (unconditional.length === 0) return;
-      const injection = createInjection(unconditional.map((rule) => ({ rule, targets: new Set<string>() })));
+      const injection = await createRuleInjection(unconditional.map((rule) => ({ rule, targets: new Set<string>() })));
       for (const rule of unconditional) injectedRuleIds.add(rule.id);
       return { message: injection };
     });
@@ -150,12 +164,13 @@ export function makeExtension() {
         .sort(comparePendingRules);
       turnTargets.clear();
       if (pending.length === 0) return;
-      pi.sendMessage(createInjection(pending), { deliverAs: "steer" });
+      pi.sendMessage(await createRuleInjection(pending), { deliverAs: "steer" });
       for (const entry of pending) injectedRuleIds.add(entry.rule.id);
     });
 
     pi.on("session_compact", async (_event, ctx) => {
       injectedRuleIds.clear();
+      injectedSkillNames.clear();
       turnTargets.clear();
       await reloadConfig(ctx.cwd);
       if (config.enabled === false) {
@@ -166,7 +181,7 @@ export function makeExtension() {
       const unconditional = freshUnconditionalRules(rules, injectedRuleIds);
       if (unconditional.length === 0) return;
       const entries = unconditional.map((rule) => ({ rule, targets: new Set<string>() }));
-      pi.sendMessage(createInjection(entries));
+      pi.sendMessage(await createRuleInjection(entries));
       for (const rule of unconditional) injectedRuleIds.add(rule.id);
     });
   };
@@ -180,20 +195,56 @@ export function isSuccessfulGitCommit(event: ToolResultEvent): boolean {
   return /(?:^|(?:&&|\|\||[;\n(])\s*)(?:rtk\s+)?git(?:\s+-C\s+(?:"[^"]*"|'[^']*'|\S+))?\s+commit(?:\s|$)/.test(command);
 }
 
-export function createInjection(entries: PendingRule[]) {
+interface SkillBlock {
+  name: string;
+  content: string;
+}
+
+export function createInjection(entries: PendingRule[], skillBlocks: SkillBlock[] = []) {
   const sorted = [...entries].sort(comparePendingRules);
   const sources = sorted.map((entry) => entry.rule.sourceLabel);
   const targets = Object.fromEntries(sorted.map((entry) => [entry.rule.sourceLabel, [...entry.targets].sort()]));
-  const body = sorted
+  const ruleBody = sorted
     .map((entry) => `## Rule: ${entry.rule.sourceLabel}\n\n${entry.rule.body}`)
     .join("\n\n---\n\n");
+  const skillBody = skillBlocks.map((skill) => skill.content).join("\n\n");
 
   return {
     customType: CUSTOM_MESSAGE_TYPE,
-    content: body,
+    content: skillBody ? `${ruleBody}\n\n---\n\n${skillBody}` : ruleBody,
     display: true,
-    details: { sources, targets } satisfies RuleInjectionDetails,
+    details: { sources, targets, skills: skillBlocks.map((skill) => skill.name) } satisfies RuleInjectionDetails,
   };
+}
+
+async function loadSkillBlocks(
+  entries: PendingRule[],
+  availableSkills: Map<string, Skill>,
+  injectedSkillNames: Set<string>,
+  reportWarning: (message: string) => void,
+): Promise<SkillBlock[]> {
+  const names = [...new Set(entries.flatMap((entry) => entry.rule.skills ?? []))]
+    .filter((name) => !injectedSkillNames.has(name))
+    .sort();
+  const blocks: SkillBlock[] = [];
+  for (const name of names) {
+    const skill = availableSkills.get(name);
+    if (!skill) {
+      reportWarning(`[pi-rules] skill not found: ${name}`);
+      continue;
+    }
+    try {
+      const body = stripFrontmatter(await readFile(skill.filePath, "utf8")).trim();
+      blocks.push({
+        name,
+        content: `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      reportWarning(`[pi-rules] failed to load skill ${name}: ${reason}`);
+    }
+  }
+  return blocks;
 }
 
 function freshUnconditionalRules(rules: Rule[], injectedRuleIds: Set<string>): Rule[] {

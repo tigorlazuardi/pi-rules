@@ -4,6 +4,7 @@ export interface Rule {
   sourceLabel: string;
   body: string;
   paths?: string[];
+  skills?: string[];
 }
 
 export interface RuleDiagnostic {
@@ -19,6 +20,7 @@ export interface DiscoveryResult {
 export interface RuleInjectionDetails {
   sources: string[];
   targets: Record<string, string[]>;
+  skills?: string[];
 }
 
 export interface PendingRule {

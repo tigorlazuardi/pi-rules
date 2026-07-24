@@ -59,7 +59,25 @@ paths: "docs/**/*.md"
 Use concise headings and relative links.
 ```
 
-Only `paths` frontmatter is supported. Markdown without frontmatter is unconditional.
+### Load skills with a rule
+
+Use non-standard `skills` frontmatter to force-load full Pi skills when the rule activates:
+
+```md
+---
+paths: "src/frontend/**"
+skills:
+  - frontend-design
+  - ui-spacing
+---
+Follow the linked frontend workflows.
+```
+
+`skills` accepts one skill name or a list. Names resolve against Pi's discovered skill registry, so normal project trust, configured skill paths, collision handling, and `--no-skills` still apply. A linked skill loads even when its own frontmatter sets `disable-model-invocation: true`; the rule link acts as explicit invocation. Missing or unreadable skills emit a warning without blocking the rule.
+
+Rules and linked skills each inject once per compaction epoch. Unconditional rules load their skills before the first model call; path-scoped rules load theirs after a successful matching `read`, `edit`, or `write`.
+
+Only `paths` and `skills` frontmatter are supported. Markdown without frontmatter is unconditional.
 
 ## Rule discovery
 
@@ -167,10 +185,10 @@ The event bus is already scoped to the current Pi runtime, so no `ExtensionConte
 
 ## Runtime behavior
 
-- Unconditional rules inject once per compaction epoch before the first model call.
-- Path-scoped rules inject once per compaction epoch after a successful matching `read`, `edit`, or `write`.
+- Unconditional rules and their linked skills inject once per compaction epoch before the first model call.
+- Path-scoped rules and their linked skills inject once per compaction epoch after a successful matching `read`, `edit`, or `write`.
 - Rule files are rediscovered at injection boundaries and turn end, so new rules and edits to not-yet-loaded rules reach the next eligible injection. Already-loaded rules refresh after compaction.
-- Parallel path matches are combined into one message.
+- Parallel path matches are combined into one message; duplicate linked skills are injected once.
 - Tool results are never modified.
 - Collapsed messages list loaded rule sources; expanded messages show matched targets and full rule bodies.
 - Compaction resets activation and immediately restores unconditional rules.
@@ -183,7 +201,7 @@ Package inheritance and extension allowlists determine which Pi sessions load th
 
 - Use **rules** for always-on or file-scoped repository constraints.
 - Use **`AGENTS.md`** for broad project and directory context Pi should discover natively.
-- Use **skills** for guidance loaded by task intent rather than file access.
+- Use standalone **skills** for guidance loaded by task intent. Link them from rule `skills` frontmatter when file access must force activation.
 
 ## Troubleshooting
 

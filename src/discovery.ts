@@ -182,9 +182,13 @@ export async function parseRuleFile(sourcePath: string, sourceLabel: string): Pr
   }
 
   const record = (raw ?? {}) as Record<string, unknown>;
-  const paths = normalizePaths(record.paths);
+  const paths = normalizeStringList(record.paths, "paths");
   if (paths && "reason" in paths) {
     return { diagnostic: { sourceLabel, reason: paths.reason } };
+  }
+  const skills = normalizeStringList(record.skills, "skills");
+  if (skills && "reason" in skills) {
+    return { diagnostic: { sourceLabel, reason: skills.reason } };
   }
 
   const rule: Rule = {
@@ -193,9 +197,8 @@ export async function parseRuleFile(sourcePath: string, sourceLabel: string): Pr
     sourceLabel,
     body: content.slice(frontmatter[0].length),
   };
-  if (paths) {
-    rule.paths = paths;
-  }
+  if (paths) rule.paths = paths;
+  if (skills) rule.skills = skills;
   return { rule };
 }
 
@@ -257,17 +260,18 @@ function labelPath(target: string, cwd: string, home: string): string {
   return labelDirectory(target, home);
 }
 
-function normalizePaths(raw: unknown): string[] | { reason: string } | undefined {
+function normalizeStringList(raw: unknown, field: "paths" | "skills"): string[] | { reason: string } | undefined {
   if (raw === undefined) return undefined;
   const values = typeof raw === "string" ? [raw] : raw;
   if (!Array.isArray(values) || !values.every((value) => typeof value === "string")) {
-    return { reason: "paths must be a string or string list" };
+    return { reason: `${field} must be a string or string list` };
   }
   const normalized = values.map((value) => value.trim());
   if (normalized.length === 0 || normalized.some((value) => value.length === 0)) {
-    return { reason: "paths must contain at least one non-empty glob" };
+    const item = field === "paths" ? "glob" : "skill name";
+    return { reason: `${field} must contain at least one non-empty ${item}` };
   }
-  return normalized;
+  return [...new Set(normalized)];
 }
 
 function labelDirectory(directory: string, home: string): string {

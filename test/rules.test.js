@@ -215,12 +215,12 @@ test("warns without crashing when config fails TypeBox validation", async () => 
   });
 });
 
-test("accepts path lists, ignores unknown fields, and diagnoses malformed frontmatter", async () => {
+test("accepts path and skill lists, ignores unknown fields, and diagnoses malformed frontmatter", async () => {
   await withTempDirectory(async (cwd) => {
     const valid = path.join(cwd, "valid.md");
     const extra = path.join(cwd, "extra.md");
     const malformed = path.join(cwd, "malformed.md");
-    await writeFile(valid, "---\npaths:\n  - src/**/*.ts\n  - tests/**\n---\nTyped", "utf8");
+    await writeFile(valid, "---\npaths:\n  - src/**/*.ts\n  - tests/**\nskills:\n  - tdd\n  - code-review\n---\nTyped", "utf8");
     await writeFile(extra, "---\ndescription: old schema\nalwaysApply: true\n---\nOld", "utf8");
     await writeFile(malformed, "---\npaths: [src/**\n---\nBad", "utf8");
 
@@ -229,6 +229,7 @@ test("accepts path lists, ignores unknown fields, and diagnoses malformed frontm
     const malformedResult = await parseRuleFile(malformed, "malformed.md");
 
     assert.deepEqual(validResult.rule.paths, ["src/**/*.ts", "tests/**"]);
+    assert.deepEqual(validResult.rule.skills, ["tdd", "code-review"]);
     assert.equal(extraResult.rule.body, "Old");
     assert.match(malformedResult.diagnostic.reason, /invalid YAML/);
   });
@@ -301,6 +302,61 @@ test("injects unconditional rules before first model call", async () => {
     assert.deepEqual(first.message.details.sources, [".agents/rules/base.md"]);
     assert.deepEqual(first.message.details.targets, { ".agents/rules/base.md": [] });
     assert.equal(second, undefined);
+  });
+});
+
+test("loads linked skills from Pi registry regardless model invocation setting", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(cwd, ".pi/rules/a.md", "---\npaths: src/a/**\nskills: [hidden-skill, missing-skill]\n---\nRule A");
+    await writeRule(cwd, ".pi/rules/b.md", "---\npaths: src/b/**\nskills: hidden-skill\n---\nRule B");
+    const skillPath = path.join(cwd, ".pi/skills/hidden-skill/SKILL.md");
+    await writeRule(
+      cwd,
+      ".pi/skills/hidden-skill/SKILL.md",
+      "---\nname: hidden-skill\ndescription: Hidden from model discovery\ndisable-model-invocation: true\n---\n# Hidden workflow\n\nFollow hidden steps.",
+    );
+    const fake = createFakePi();
+    const warnings = [];
+    const ctx = { cwd, hasUI: true, ui: { notify: (message) => warnings.push(message) } };
+    extension(fake.api);
+    await fake.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await fake.emit(
+      "before_agent_start",
+      {
+        type: "before_agent_start",
+        systemPromptOptions: {
+          skills: [{
+            name: "hidden-skill",
+            description: "Hidden from model discovery",
+            filePath: skillPath,
+            baseDir: path.dirname(skillPath),
+            disableModelInvocation: true,
+          }],
+        },
+      },
+      ctx,
+    );
+
+    await fake.emit("tool_result", toolResult("read", "src/a/file.ts"), ctx);
+    await fake.emit("turn_end", { type: "turn_end" }, ctx);
+
+    assert.match(fake.sent[0].message.content, /Rule A/);
+    assert.match(fake.sent[0].message.content, /<skill name="hidden-skill"/);
+    assert.match(fake.sent[0].message.content, /Follow hidden steps\./);
+    assert.doesNotMatch(fake.sent[0].message.content, /disable-model-invocation/);
+    assert.deepEqual(fake.sent[0].message.details.skills, ["hidden-skill"]);
+    assert.equal(warnings.some((warning) => /skill not found: missing-skill/.test(warning)), true);
+
+    await fake.emit("tool_result", toolResult("read", "src/b/file.ts"), ctx);
+    await fake.emit("turn_end", { type: "turn_end" }, ctx);
+    assert.match(fake.sent[1].message.content, /Rule B/);
+    assert.doesNotMatch(fake.sent[1].message.content, /<skill name=/);
+    assert.deepEqual(fake.sent[1].message.details.skills, []);
+
+    await fake.emit("session_compact", { type: "session_compact", willRetry: true }, ctx);
+    await fake.emit("tool_result", toolResult("read", "src/b/again.ts"), ctx);
+    await fake.emit("turn_end", { type: "turn_end" }, ctx);
+    assert.match(fake.sent[2].message.content, /<skill name="hidden-skill"/);
   });
 });
 
