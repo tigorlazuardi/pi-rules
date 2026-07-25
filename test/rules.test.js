@@ -88,17 +88,28 @@ function bashResult(command, overrides = {}) {
   return toolResult("bash", undefined, { input: { command }, ...overrides });
 }
 
-test("uses first non-empty rule root and sorts nested files", async () => {
-  await withTempDirectory(async (cwd) => {
+test("merges rule roots by priority and deduplicates rule names", async () => {
+  await withTempDirectory(async (root) => {
+    const cwd = path.join(root, "repo");
+    const home = path.join(root, "home");
     await writeRule(cwd, ".pi/rules/z.md", "Always Z");
     await writeRule(cwd, ".pi/rules/backend/auth.md", "---\npaths: src/auth/**\n---\nAuth rule");
-    await writeRule(cwd, ".agents/rules/a.md", "Ignored agents fallback");
-    await writeRule(cwd, ".claude/rules/a.md", "Ignored Claude fallback");
+    await writeRule(cwd, ".agents/rules/a.md", "Agents rule");
+    await writeRule(cwd, ".agents/rules/auth.md", "Ignored duplicate auth");
+    await writeRule(cwd, ".claude/rules/a.md", "Ignored duplicate a");
+    await writeRule(cwd, ".claude/rules/claude.md", "Claude rule");
+    await writeRule(root, "home/.pi/agent/rules/user.md", "User rule");
     await writeRule(cwd, ".pi/rules/ignored.txt", "not markdown");
 
-    const result = await discoverRules(cwd);
+    const result = await discoverRules(cwd, { home, env: {} });
 
-    assert.deepEqual(result.rules.map((rule) => rule.sourceLabel), [".pi/rules/backend/auth.md", ".pi/rules/z.md"]);
+    assert.deepEqual(result.rules.map((rule) => rule.sourceLabel), [
+      ".pi/rules/backend/auth.md",
+      ".pi/rules/z.md",
+      ".agents/rules/a.md",
+      ".claude/rules/claude.md",
+      "~/.pi/agent/rules/user.md",
+    ]);
     assert.deepEqual(result.rules[0].paths, ["src/auth/**"]);
     assert.equal(result.rules[0].body, "Auth rule");
     assert.equal(result.rules[1].paths, undefined);
@@ -106,7 +117,7 @@ test("uses first non-empty rule root and sorts nested files", async () => {
   });
 });
 
-test("falls back through configured global rule roots", async () => {
+test("merges configured global rule roots", async () => {
   await withTempDirectory(async (root) => {
     const cwd = path.join(root, "repo");
     const home = path.join(root, "home");
@@ -130,12 +141,16 @@ test("falls back through configured global rule roots", async () => {
     await writeRule(root, "home/.pi/agent/rules/default-agent.md", "Default coding agent rule");
     const defaultCodingAgent = await discoverRules(cwd, { home, env: {} });
 
-    assert.deepEqual(configured.rules.map((rule) => rule.body), ["Coding agent rule"]);
-    assert.deepEqual(piConfigOnly.rules.map((rule) => rule.body), ["PI config rule"]);
-    assert.deepEqual(codingAgentOnly.rules.map((rule) => rule.body), ["Coding agent rule"]);
-    assert.deepEqual(agentsFallback.rules.map((rule) => rule.body), ["Agents rule"]);
+    assert.deepEqual(configured.rules.map((rule) => rule.body), ["Coding agent rule", "Agents rule", "Claude rule"]);
+    assert.deepEqual(piConfigOnly.rules.map((rule) => rule.body), ["PI config rule", "Agents rule", "Claude rule"]);
+    assert.deepEqual(codingAgentOnly.rules.map((rule) => rule.body), [
+      "Coding agent rule",
+      "Agents rule",
+      "Claude rule",
+    ]);
+    assert.deepEqual(agentsFallback.rules.map((rule) => rule.body), ["Agents rule", "Claude rule"]);
     assert.deepEqual(claudeFallback.rules.map((rule) => rule.body), ["Claude rule"]);
-    assert.deepEqual(defaultCodingAgent.rules.map((rule) => rule.body), ["Default coding agent rule"]);
+    assert.deepEqual(defaultCodingAgent.rules.map((rule) => rule.body), ["Default coding agent rule", "Claude rule"]);
   });
 });
 

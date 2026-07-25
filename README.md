@@ -97,7 +97,7 @@ Only `paths` and `skills` frontmatter are supported. Markdown without frontmatte
 
 ## Rule discovery
 
-Rules are read recursively from the **first non-empty directory** in this order:
+Rules are read recursively from every configured source in priority order:
 
 1. `<repo>/.pi/rules/`
 2. `<repo>/.agents/rules/`
@@ -108,7 +108,7 @@ Rules are read recursively from the **first non-empty directory** in this order:
 
 Default Pi user rules live in `~/.pi/agent/rules/`.
 
-Sources are fallbacks, not merged layers. For example, when `.pi/rules/` contains any Markdown file, `.agents/rules/`, `.claude/rules/`, and user sources are ignored. Files inside the selected directory are sorted and loaded together. Symlinks are ignored.
+Rules from all sources are merged. The filename stem is the rule name: both `backend/auth.md` and `auth.md` are named `auth`. The first source containing a name wins; later rules with that name are skipped. Files are sorted within each source, so the first same-name file there wins too. Symlinks are ignored.
 
 `PI_CODING_AGENT_DIR` points directly to Pi's agent directory. When unset, the directory resolves to `${PI_CONFIG_DIR:-~/.pi}/agent`.
 
@@ -137,7 +137,7 @@ Repository configuration wins whenever `<repo>/.pi/rules.json` exists. Configura
 }
 ```
 
-Array order controls precedence. Remove a source to disable that fallback. Use an empty array to disable all rule discovery:
+Array order controls duplicate-name precedence. Remove a source to exclude it. Use an empty array to disable all rule discovery:
 
 ```json
 { "sources": [] }
@@ -225,7 +225,7 @@ Package inheritance and extension allowlists determine which Pi sessions load th
 
 1. Confirm package is enabled with `pi list` or `pi config`.
 2. Run `/reload` after installation or configuration changes.
-3. Check whether an earlier non-empty source directory is winning.
+3. Check whether a higher-priority source contains the same rule filename stem.
 4. Read stderr for `[pi-rules] invalid config` or `[pi-rules] skipped` warnings.
 
 ### Path rule does not activate
@@ -235,9 +235,9 @@ Package inheritance and extension allowlists determine which Pi sessions load th
 - Files outside current repository do not activate project rules.
 - Rule already loaded in current compaction epoch will not load again until compaction.
 
-### Claude rules are ignored
+### A Claude rule is missing
 
-An earlier `.pi/rules/` or `.agents/rules/` directory contains Markdown. Remove it or change source priority in `.pi/rules.json`.
+A higher-priority source contains the same rule filename stem. Rename one rule or change source priority in `.pi/rules.json`. Unique Claude rules merge normally.
 
 ## Development
 

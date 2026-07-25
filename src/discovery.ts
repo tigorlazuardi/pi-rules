@@ -111,13 +111,17 @@ export async function discoverRules(cwd: string, options: DiscoveryOptions = {})
   const env = options.env ?? process.env;
   const roots = (options.sources ?? DEFAULT_RULE_SOURCES).map((source) => resolveRuleRoot(source, cwd, env, home));
 
+  const rules: Rule[] = [];
+  const diagnostics: RuleDiagnostic[] = [];
+  const names = new Set<string>();
+
   for (const root of roots) {
     const files = await findMarkdownFiles(root.directory);
-    if (files.length === 0) continue;
-
-    const rules: Rule[] = [];
-    const diagnostics: RuleDiagnostic[] = [];
     for (const relativePath of files) {
+      const name = path.basename(relativePath, ".md");
+      if (names.has(name)) continue;
+      names.add(name);
+
       const sourcePath = path.join(root.directory, ...relativePath.split("/"));
       const sourceLabel = `${root.label}/${relativePath}`;
       const parsed = await parseRuleFile(sourcePath, sourceLabel);
@@ -127,10 +131,9 @@ export async function discoverRules(cwd: string, options: DiscoveryOptions = {})
         diagnostics.push(parsed.diagnostic);
       }
     }
-    return { rules, diagnostics };
   }
 
-  return { rules: [], diagnostics: [] };
+  return { rules, diagnostics };
 }
 
 export async function parseRuleFile(sourcePath: string, sourceLabel: string): Promise<ParseResult> {
