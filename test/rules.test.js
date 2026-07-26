@@ -322,6 +322,9 @@ test("matches Claude-style paths and optional Pi tool_call filters", () => {
   assert.equal(ruleMatchesToolCallEvent(rule, "read"), false);
   assert.equal(ruleMatchesToolCallEvent(rule, "edit"), true);
   assert.equal(ruleMatchesToolCallEvent({ ...rule, events: undefined }, "read"), true);
+  assert.equal(ruleMatchesToolCallEvent({ ...rule, events: undefined }, "edit"), true);
+  assert.equal(ruleMatchesToolCallEvent({ ...rule, events: { tool_call: ["read"] } }, "read"), true);
+  assert.equal(ruleMatchesToolCallEvent({ ...rule, events: { tool_call: ["read"] } }, "write"), false);
 });
 
 test("injects unconditional rules before first model call", async () => {
@@ -345,8 +348,8 @@ test("injects unconditional rules before first model call", async () => {
 
 test("loads linked skills from Pi registry regardless model invocation setting", async () => {
   await withTempDirectory(async (cwd) => {
-    await writeRule(cwd, ".pi/rules/a.md", "---\npaths: src/a/**\nskills: [hidden-skill, missing-skill]\n---\nRule A");
-    await writeRule(cwd, ".pi/rules/b.md", "---\npaths: src/b/**\nskills: hidden-skill\n---\nRule B");
+    await writeRule(cwd, ".pi/rules/a.md", "---\npaths: src/a/**\nevents:\n  tool_call: read\nskills: [hidden-skill, missing-skill]\n---\nRule A");
+    await writeRule(cwd, ".pi/rules/b.md", "---\npaths: src/b/**\nevents:\n  tool_call: read\nskills: hidden-skill\n---\nRule B");
     const skillPath = path.join(cwd, ".pi/skills/hidden-skill/SKILL.md");
     await writeRule(
       cwd,
@@ -376,8 +379,7 @@ test("loads linked skills from Pi registry regardless model invocation setting",
     );
 
     const firstCall = await fake.emit("tool_call", toolCall("read", "src/a/file.ts"), ctx);
-    assert.equal(firstCall.block, true);
-    assert.match(firstCall.reason, /retry after they load/);
+    assert.equal(firstCall, undefined);
     assert.equal(fake.sent.length, 0);
     await fake.emit("turn_end", { type: "turn_end" }, ctx);
 
@@ -391,7 +393,7 @@ test("loads linked skills from Pi registry regardless model invocation setting",
     assert.equal(await fake.emit("tool_call", toolCall("read", "src/a/file.ts"), ctx), undefined);
 
     const secondCall = await fake.emit("tool_call", toolCall("read", "src/b/file.ts"), ctx);
-    assert.equal(secondCall.block, true);
+    assert.equal(secondCall, undefined);
     await fake.emit("turn_end", { type: "turn_end" }, ctx);
     assert.match(fake.sent[1].message.content, /Rule B/);
     assert.doesNotMatch(fake.sent[1].message.content, /<skill name=/);
@@ -399,7 +401,7 @@ test("loads linked skills from Pi registry regardless model invocation setting",
 
     await fake.emit("session_compact", { type: "session_compact", willRetry: true }, ctx);
     const afterCompact = await fake.emit("tool_call", toolCall("read", "src/b/again.ts"), ctx);
-    assert.equal(afterCompact.block, true);
+    assert.equal(afterCompact, undefined);
     await fake.emit("turn_end", { type: "turn_end" }, ctx);
     assert.match(fake.sent[2].message.content, /<skill name="hidden-skill"/);
   });
@@ -419,7 +421,7 @@ test("reads fresh rule content at each injection boundary", async () => {
     assert.doesNotMatch(eager.message.content, /Base v1/);
 
     await writeRule(cwd, ".pi/rules/scoped.md", "---\npaths: src/**\n---\nScoped v2");
-    const call = await fake.emit("tool_call", toolCall("read", "src/a.ts"), { cwd });
+    const call = await fake.emit("tool_call", toolCall("edit", "src/a.ts"), { cwd });
     assert.equal(call.block, true);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.match(fake.sent[0].message.content, /Scoped v2/);
@@ -438,7 +440,7 @@ test("discovers new unconditional and matching path rules before tool execution"
 
     await writeRule(cwd, ".pi/rules/new-base.md", "New base rule");
     await writeRule(cwd, ".pi/rules/new-path.md", "---\npaths: src/**\n---\nNew path rule");
-    const call = await fake.emit("tool_call", toolCall("read", "src/new.ts"), { cwd });
+    const call = await fake.emit("tool_call", toolCall("edit", "src/new.ts"), { cwd });
     assert.equal(call.block, true);
     assert.equal(fake.sent.length, 0);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
@@ -450,7 +452,7 @@ test("discovers new unconditional and matching path rules before tool execution"
     assert.match(fake.sent[0].message.content, /New base rule/);
     assert.match(fake.sent[0].message.content, /New path rule/);
 
-    assert.equal(await fake.emit("tool_call", toolCall("read", "src/again.ts"), { cwd }), undefined);
+    assert.equal(await fake.emit("tool_call", toolCall("edit", "src/again.ts"), { cwd }), undefined);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.equal(fake.sent.length, 1);
   });
@@ -464,7 +466,7 @@ test("parallel preflight matches aggregate once and block every governed tool", 
     extension(fake.api);
     await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
 
-    const first = toolCall("read", "src/a.ts", { toolCallId: "read-a" });
+    const first = toolCall("write", "src/a.ts", { toolCallId: "write-a" });
     const second = toolCall("edit", "src/b.ts", { toolCallId: "edit-b" });
     const before = structuredClone([first, second]);
     const results = await Promise.all([
@@ -490,18 +492,18 @@ test("parallel preflight matches aggregate once and block every governed tool", 
     assert.match(fake.sent[0].message.content, /Auth rule/);
     assert.match(fake.sent[0].message.content, /TypeScript rule/);
 
-    assert.equal(await fake.emit("tool_call", toolCall("read", "src/c.ts"), { cwd }), undefined);
+    assert.equal(await fake.emit("tool_call", toolCall("edit", "src/c.ts"), { cwd }), undefined);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.equal(fake.sent.length, 1);
   });
 });
 
-test("tool_call event filters skip reads and activate before edits or writes", async () => {
+test("path rules inject after reads and block before edits or writes", async () => {
   await withTempDirectory(async (cwd) => {
     await writeRule(
       cwd,
-      ".pi/rules/write-only.md",
-      "---\npaths: src/**\nevents:\n  tool_call: [edit, write]\n---\nMutation rule",
+      ".pi/rules/scoped.md",
+      "---\npaths: src/**\n---\nMutation rule",
     );
     const fake = createFakePi();
     extension(fake.api);
@@ -509,19 +511,22 @@ test("tool_call event filters skip reads and activate before edits or writes", a
 
     assert.equal(await fake.emit("tool_call", toolCall("read", "src/a.ts"), { cwd }), undefined);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
-    assert.equal(fake.sent.length, 0);
-
-    const editCall = await fake.emit("tool_call", toolCall("edit", "src/a.ts"), { cwd });
-    assert.equal(editCall.block, true);
-    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
-    assert.deepEqual(fake.sent[0].message.details.targets, { ".pi/rules/write-only.md": ["src/a.ts"] });
+    assert.deepEqual(fake.sent[0].message.details.targets, { ".pi/rules/scoped.md": ["src/a.ts"] });
 
     await fake.emit("session_compact", { type: "session_compact", willRetry: true }, { cwd });
     assert.equal(fake.sent.length, 1);
+    const editCall = await fake.emit("tool_call", toolCall("edit", "src/a.ts"), { cwd });
+    assert.equal(editCall.block, true);
+    assert.equal(editCall.reason, "Tool `edit` paused: matching rules aren't loaded yet. Pi will load them first; please retry.");
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
+    assert.deepEqual(fake.sent[1].message.details.targets, { ".pi/rules/scoped.md": ["src/a.ts"] });
+
+    await fake.emit("session_compact", { type: "session_compact", willRetry: true }, { cwd });
+    assert.equal(fake.sent.length, 2);
     const writeCall = await fake.emit("tool_call", toolCall("write", "src/b.ts"), { cwd });
     assert.equal(writeCall.block, true);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
-    assert.deepEqual(fake.sent[1].message.details.targets, { ".pi/rules/write-only.md": ["src/b.ts"] });
+    assert.deepEqual(fake.sent[2].message.details.targets, { ".pi/rules/scoped.md": ["src/b.ts"] });
   });
 });
 
@@ -532,7 +537,7 @@ test("no path match produces no row or message", async () => {
     extension(fake.api);
     await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
 
-    assert.equal(await fake.emit("tool_call", toolCall("read", "src/ui/button.ts"), { cwd }), undefined);
+    assert.equal(await fake.emit("tool_call", toolCall("edit", "src/ui/button.ts"), { cwd }), undefined);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
 
     assert.equal(fake.sent.length, 0);
@@ -686,7 +691,7 @@ test("compaction re-injects unconditional rules and permits lazy re-injection", 
     await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
 
     await fake.emit("before_agent_start", { type: "before_agent_start" }, { cwd });
-    const firstCall = await fake.emit("tool_call", toolCall("read", "src/auth/user.ts"), { cwd });
+    const firstCall = await fake.emit("tool_call", toolCall("edit", "src/auth/user.ts"), { cwd });
     assert.equal(firstCall.block, true);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.equal(fake.sent.length, 1);
@@ -698,7 +703,7 @@ test("compaction re-injects unconditional rules and permits lazy re-injection", 
     assert.equal(fake.sent[1].options, undefined);
 
     await writeRule(cwd, ".agents/rules/auth.md", "---\npaths: src/auth/**\n---\nFresh auth rule");
-    const secondCall = await fake.emit("tool_call", toolCall("read", "src/auth/session.ts"), { cwd });
+    const secondCall = await fake.emit("tool_call", toolCall("write", "src/auth/session.ts"), { cwd });
     assert.equal(secondCall.block, true);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.equal(fake.sent.length, 3);

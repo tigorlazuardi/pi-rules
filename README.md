@@ -27,7 +27,7 @@ pi -e npm:@tigorhutasuhut/pi-rules
 Pin, update, or remove the package:
 
 ```sh
-pi install npm:@tigorhutasuhut/pi-rules@0.5.0
+pi install npm:@tigorhutasuhut/pi-rules@0.5.1
 pi update npm:@tigorhutasuhut/pi-rules
 pi remove npm:@tigorhutasuhut/pi-rules
 ```
@@ -64,7 +64,7 @@ Use strict TypeScript.
 Keep tests close to the behavior they verify.
 ```
 
-Path-scoped rules activate before Pi reads, edits, or writes a matching project file. The first governed tool call is blocked so the rule enters model context; the agent can then retry with the rule loaded. Globs are repository-relative, use `/` separators, and match dotfiles.
+Path-scoped rules activate around matching project-file reads, edits, and writes. Reads execute normally, then the rule enters model context before Pi processes the result. Edits and writes pause before execution so the rule can load; the agent then retries the mutation. Globs are repository-relative, use `/` separators, and match dotfiles.
 
 `paths` accepts one glob string or a list:
 
@@ -75,22 +75,20 @@ paths: "docs/**/*.md"
 Use concise headings and relative links.
 ```
 
-### Limit a rule to Pi events
+### Choose activation tools
 
-Use non-standard `events` frontmatter when a path rule should activate only for selected Pi events:
+Use non-standard `events` frontmatter to limit activation to selected tools:
 
 ```md
 ---
 paths: "docs/**/*.md"
 events:
-  tool_call:
-    - edit
-    - write
+  tool_call: read
 ---
-Write documentation for library consumers.
+Apply this guidance before reading documentation.
 ```
 
-This rule activates before matching `edit` and `write` calls, but not `read`. `events` keys are Pi event names; `tool_call` values filter its `toolName` payload. It accepts one of `read`, `edit`, or `write`, or a list. Omitting `events` preserves the default: all three tool calls. A rule with `events` but no `paths` applies to every project-local file target for the selected calls.
+This rule activates after matching `read` calls, but not for `edit` or `write`. `events` keys are Pi event names; `tool_call` values filter its `toolName` payload. It accepts one of `read`, `edit`, or `write`, or a list. Omitting `events` preserves the default: all three tools. A rule with `events` but no `paths` applies to every project-local file target for the selected calls.
 
 Only the blockable `tool_call` Pi event is supported. Unsupported event or tool names skip the rule with a warning.
 
@@ -221,7 +219,7 @@ The event bus is already scoped to the current Pi runtime, so no `ExtensionConte
 ## Runtime behavior
 
 - Unconditional rules and their linked skills inject once per compaction epoch before the first model call.
-- Scoped rules and their linked skills inject once per compaction epoch before a matching `read`, `edit`, or `write` executes. `events.tool_call` can limit which calls activate a rule. The first governed call is blocked and asks the agent to retry after injection.
+- Scoped rules and their linked skills inject once per compaction epoch around matching `read`, `edit`, or `write` calls. Reads execute first and continue without retry; edits and writes pause before execution and ask the agent to retry after injection. `events.tool_call` can limit activation.
 - Rule files are rediscovered before governed tool calls and at turn end, so new rules and edits to not-yet-loaded rules reach the next eligible injection. Already-loaded rules refresh after compaction.
 - Parallel path matches are combined into one message; duplicate linked skills are injected once.
 - Tool results are never modified.
@@ -250,7 +248,7 @@ Package inheritance and extension allowlists determine which Pi sessions load th
 ### Path rule does not activate
 
 - Make glob repository-relative: `src/**/*.ts`, not an absolute path.
-- Confirm Pi attempted `read`, `edit`, or `write` on a matching file and that `events.tool_call`, when present, includes that tool name. The first governed call should be blocked, inject the rule, then be retried.
+- Confirm Pi attempted `read`, `edit`, or `write` on a matching file and that `events.tool_call`, when present, includes that tool name. Matching reads should execute and then inject the rule; matching edits or writes should pause, inject, then retry.
 - Files outside current repository do not activate project rules.
 - Rule already loaded in current compaction epoch will not load again until compaction.
 

@@ -146,7 +146,7 @@ export function makeExtension() {
         if (injectedRuleIds.has(rule.id)) continue;
         if (rule.paths && !ruleMatchesTarget(rule, target)) continue;
         if (!ruleMatchesToolCallEvent(rule, event.toolName)) continue;
-        shouldBlock = true;
+        if (event.toolName !== "read") shouldBlock = true;
         const pending = pendingRules.get(rule.id);
         const isScoped = Boolean(rule.paths || rule.events);
         if (pending) {
@@ -157,8 +157,8 @@ export function makeExtension() {
       }
       if (!shouldBlock) return;
 
-      // ponytail: Pi cannot add context before an already-issued tool call, so block once and let the model retry.
-      return { block: true, reason: "Matching rules queued for injection; retry after they load." };
+      // ponytail: reads can finish before the next model turn; mutations pause because their arguments are already issued.
+      return { block: true, reason: `Tool \`${event.toolName}\` paused: matching rules aren't loaded yet. Pi will load them first; please retry.` };
     });
 
     pi.on("tool_result", (event) => {
