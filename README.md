@@ -64,7 +64,7 @@ Use strict TypeScript.
 Keep tests close to the behavior they verify.
 ```
 
-Path-scoped rules activate after Pi successfully reads, edits, or writes a matching project file. Globs are repository-relative, use `/` separators, and match dotfiles.
+Path-scoped rules activate before Pi reads, edits, or writes a matching project file. The first governed tool call is blocked so the rule enters model context; the agent can then retry with the rule loaded. Globs are repository-relative, use `/` separators, and match dotfiles.
 
 `paths` accepts one glob string or a list:
 
@@ -91,7 +91,7 @@ Follow the linked frontend workflows.
 
 `skills` accepts one skill name or a list. Names resolve against Pi's discovered skill registry, so normal project trust, configured skill paths, collision handling, and `--no-skills` still apply. A linked skill loads even when its own frontmatter sets `disable-model-invocation: true`; the rule link acts as explicit invocation. Missing or unreadable skills emit a warning without blocking the rule.
 
-Rules and linked skills each inject once per compaction epoch. Unconditional rules load their skills before the first model call; path-scoped rules load theirs after a successful matching `read`, `edit`, or `write`.
+Rules and linked skills each inject once per compaction epoch. Unconditional rules load their skills before the first model call; path-scoped rules block the first matching `read`, `edit`, or `write`, load their skills, then allow retries.
 
 Only `paths` and `skills` frontmatter are supported. Markdown without frontmatter is unconditional.
 
@@ -202,8 +202,8 @@ The event bus is already scoped to the current Pi runtime, so no `ExtensionConte
 ## Runtime behavior
 
 - Unconditional rules and their linked skills inject once per compaction epoch before the first model call.
-- Path-scoped rules and their linked skills inject once per compaction epoch after a successful matching `read`, `edit`, or `write`.
-- Rule files are rediscovered at injection boundaries and turn end, so new rules and edits to not-yet-loaded rules reach the next eligible injection. Already-loaded rules refresh after compaction.
+- Path-scoped rules and their linked skills inject once per compaction epoch before a matching `read`, `edit`, or `write` executes. The first governed call is blocked and asks the agent to retry after injection.
+- Rule files are rediscovered before governed tool calls and at turn end, so new rules and edits to not-yet-loaded rules reach the next eligible injection. Already-loaded rules refresh after compaction.
 - Parallel path matches are combined into one message; duplicate linked skills are injected once.
 - Tool results are never modified.
 - Collapsed messages list loaded rule sources; expanded messages show matched targets and full rule bodies.
@@ -231,7 +231,7 @@ Package inheritance and extension allowlists determine which Pi sessions load th
 ### Path rule does not activate
 
 - Make glob repository-relative: `src/**/*.ts`, not an absolute path.
-- Confirm Pi successfully used `read`, `edit`, or `write` on matching file.
+- Confirm Pi attempted `read`, `edit`, or `write` on a matching file. The first governed call should be blocked, inject the rule, then be retried.
 - Files outside current repository do not activate project rules.
 - Rule already loaded in current compaction epoch will not load again until compaction.
 

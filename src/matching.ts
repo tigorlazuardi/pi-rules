@@ -1,13 +1,13 @@
 import path from "node:path";
 import picomatch from "picomatch";
-import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type { ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import type { Rule } from "./types.js";
 
 const FILE_TOOLS = new Set(["read", "edit", "write"]);
 
-export function extractTarget(event: ToolResultEvent, cwd: string): string | undefined {
-  if (event.isError || !FILE_TOOLS.has(event.toolName)) return undefined;
-  const rawPath = event.input.path;
+export function extractTarget(event: ToolCallEvent | ToolResultEvent, cwd: string): string | undefined {
+  if (("isError" in event && event.isError) || !FILE_TOOLS.has(event.toolName)) return undefined;
+  const rawPath = (event.input as { path?: unknown }).path;
   if (typeof rawPath !== "string" || rawPath.trim().length === 0) return undefined;
 
   const withoutAt = rawPath.startsWith("@") ? rawPath.slice(1) : rawPath;

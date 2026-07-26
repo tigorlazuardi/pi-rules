@@ -34,7 +34,7 @@ export function makeExtension() {
     const injectedRuleIds = new Set<string>();
     const injectedSkillNames = new Set<string>();
     const availableSkills = new Map<string, Skill>();
-    const turnTargets = new Set<string>();
+    const pendingRules = new Map<string, PendingRule>();
 
     const stopConfigListener = pi.events.on(CONFIG_EVENT, (value) => {
       const validation = validateRuleConfigPatch(value);
@@ -45,7 +45,7 @@ export function makeExtension() {
       config = { ...config, ...validation.config };
       if (config.enabled === false) {
         pendingRuleNudge = false;
-        turnTargets.clear();
+        pendingRules.clear();
       }
     });
     pi.on("session_shutdown", stopConfigListener);
@@ -116,7 +116,7 @@ export function makeExtension() {
       injectedRuleIds.clear();
       injectedSkillNames.clear();
       availableSkills.clear();
-      turnTargets.clear();
+      pendingRules.clear();
     });
 
     pi.on("before_agent_start", async (event, ctx) => {
@@ -124,17 +124,42 @@ export function makeExtension() {
       for (const skill of event.systemPromptOptions?.skills ?? []) availableSkills.set(skill.name, skill);
       if (config.enabled === false) return;
       rules = await reloadRules(ctx.cwd);
-      const unconditional = freshUnconditionalRules(rules, injectedRuleIds);
-      if (unconditional.length === 0) return;
-      const injection = await createRuleInjection(unconditional.map((rule) => ({ rule, targets: new Set<string>() })));
-      for (const rule of unconditional) injectedRuleIds.add(rule.id);
+      const unconditional = freshUnconditionalRules(rules, injectedRuleIds)
+        .filter((rule) => !pendingRules.has(rule.id))
+        .map((rule) => ({ rule, targets: new Set<string>() }));
+      const entries = [...pendingRules.values(), ...unconditional];
+      if (entries.length === 0) return;
+      const injection = await createRuleInjection(entries);
+      for (const entry of entries) injectedRuleIds.add(entry.rule.id);
+      pendingRules.clear();
       return { message: injection };
     });
 
-    pi.on("tool_result", (event, ctx) => {
+    pi.on("tool_call", async (event, ctx) => {
       if (config.enabled === false) return;
       const target = extractTarget(event, ctx.cwd);
-      if (target) turnTargets.add(target);
+      if (!target) return;
+      rules = await reloadRules(ctx.cwd);
+
+      let shouldBlock = false;
+      for (const rule of rules) {
+        if (injectedRuleIds.has(rule.id) || (rule.paths && !ruleMatchesTarget(rule, target))) continue;
+        shouldBlock = true;
+        const pending = pendingRules.get(rule.id);
+        if (pending) {
+          if (rule.paths) pending.targets.add(target);
+        } else {
+          pendingRules.set(rule.id, { rule, targets: new Set(rule.paths ? [target] : []) });
+        }
+      }
+      if (!shouldBlock) return;
+
+      // ponytail: Pi cannot add context before an already-issued tool call, so block once and let the model retry.
+      return { block: true, reason: "Matching rules queued for injection; retry after they load." };
+    });
+
+    pi.on("tool_result", (event) => {
+      if (config.enabled === false) return;
       if (config.nudges?.afterCommit && isSuccessfulGitCommit(event)) pendingRuleNudge = true;
     });
 
@@ -150,28 +175,24 @@ export function makeExtension() {
 
     pi.on("turn_end", async (_event, ctx) => {
       if (config.enabled === false) {
-        turnTargets.clear();
+        pendingRules.clear();
         return;
       }
       rules = await reloadRules(ctx.cwd);
-      const pending = rules
-        .flatMap((rule) => {
-          if (injectedRuleIds.has(rule.id)) return [];
-          if (!rule.paths) return [{ rule, targets: new Set<string>() }];
-          const targets = new Set([...turnTargets].filter((target) => ruleMatchesTarget(rule, target)));
-          return targets.size > 0 ? [{ rule, targets }] : [];
-        })
-        .sort(comparePendingRules);
-      turnTargets.clear();
+      for (const rule of freshUnconditionalRules(rules, injectedRuleIds)) {
+        if (!pendingRules.has(rule.id)) pendingRules.set(rule.id, { rule, targets: new Set<string>() });
+      }
+      const pending = [...pendingRules.values()].sort(comparePendingRules);
       if (pending.length === 0) return;
       pi.sendMessage(await createRuleInjection(pending), { deliverAs: "steer" });
       for (const entry of pending) injectedRuleIds.add(entry.rule.id);
+      pendingRules.clear();
     });
 
     pi.on("session_compact", async (_event, ctx) => {
       injectedRuleIds.clear();
       injectedSkillNames.clear();
-      turnTargets.clear();
+      pendingRules.clear();
       await reloadConfig(ctx.cwd);
       if (config.enabled === false) {
         rules = [];
