@@ -4,9 +4,10 @@ import path from "node:path";
 import Type from "typebox";
 import Schema from "typebox/schema";
 import { parseDocument } from "yaml";
-import type { DiscoveryResult, Rule, RuleDiagnostic } from "./types.js";
+import type { DiscoveryResult, Rule, RuleDiagnostic, RuleEvents, RuleToolName } from "./types.js";
 
 const FRONTMATTER_RE = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
+const RULE_TOOL_NAMES = new Set<RuleToolName>(["read", "edit", "write"]);
 
 const RULE_SOURCE_SCHEMA = Type.Object({
   scope: Type.Union([Type.Literal("repo"), Type.Literal("user")]),
@@ -185,11 +186,15 @@ export async function parseRuleFile(sourcePath: string, sourceLabel: string): Pr
   }
 
   const record = (raw ?? {}) as Record<string, unknown>;
-  const paths = normalizeStringList(record.paths, "paths");
+  const paths = normalizeStringList(record.paths, "paths", "glob");
   if (paths && "reason" in paths) {
     return { diagnostic: { sourceLabel, reason: paths.reason } };
   }
-  const skills = normalizeStringList(record.skills, "skills");
+  const events = normalizeRuleEvents(record.events);
+  if (events && "reason" in events) {
+    return { diagnostic: { sourceLabel, reason: events.reason } };
+  }
+  const skills = normalizeStringList(record.skills, "skills", "skill name");
   if (skills && "reason" in skills) {
     return { diagnostic: { sourceLabel, reason: skills.reason } };
   }
@@ -201,6 +206,7 @@ export async function parseRuleFile(sourcePath: string, sourceLabel: string): Pr
     body: content.slice(frontmatter[0].length),
   };
   if (paths) rule.paths = paths;
+  if (events) rule.events = events;
   if (skills) rule.skills = skills;
   return { rule };
 }
@@ -263,7 +269,31 @@ function labelPath(target: string, cwd: string, home: string): string {
   return labelDirectory(target, home);
 }
 
-function normalizeStringList(raw: unknown, field: "paths" | "skills"): string[] | { reason: string } | undefined {
+function normalizeRuleEvents(raw: unknown): RuleEvents | { reason: string } | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { reason: "events must be a mapping of Pi event names to filters" };
+  }
+
+  const record = raw as Record<string, unknown>;
+  const unsupported = Object.keys(record).filter((name) => name !== "tool_call");
+  if (unsupported.length > 0) {
+    return { reason: `events contains unsupported Pi event: ${unsupported.join(", ")}` };
+  }
+  const toolNames = normalizeStringList(record.tool_call, "events.tool_call", "tool name");
+  if (!toolNames) return { reason: "events must include tool_call" };
+  if ("reason" in toolNames) return toolNames;
+  if (!toolNames.every((name): name is RuleToolName => RULE_TOOL_NAMES.has(name as RuleToolName))) {
+    return { reason: "events.tool_call supports only read, edit, or write" };
+  }
+  return { tool_call: toolNames };
+}
+
+function normalizeStringList(
+  raw: unknown,
+  field: string,
+  item: string,
+): string[] | { reason: string } | undefined {
   if (raw === undefined) return undefined;
   const values = typeof raw === "string" ? [raw] : raw;
   if (!Array.isArray(values) || !values.every((value) => typeof value === "string")) {
@@ -271,7 +301,6 @@ function normalizeStringList(raw: unknown, field: "paths" | "skills"): string[] 
   }
   const normalized = values.map((value) => value.trim());
   if (normalized.length === 0 || normalized.some((value) => value.length === 0)) {
-    const item = field === "paths" ? "glob" : "skill name";
     return { reason: `${field} must contain at least one non-empty ${item}` };
   }
   return [...new Set(normalized)];

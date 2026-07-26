@@ -30,6 +30,10 @@ export function ruleMatchesTarget(rule: Rule, target: string): boolean {
   return picomatch.isMatch(target, patterns, { dot: true });
 }
 
+export function ruleMatchesToolCallEvent(rule: Rule, toolName: string): boolean {
+  return !rule.events || rule.events.tool_call.some((name) => name === toolName);
+}
+
 function normalizePattern(pattern: string): string {
   return toPosixPath(pattern).replace(/^\.\//, "");
 }

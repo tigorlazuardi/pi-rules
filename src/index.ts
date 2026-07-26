@@ -3,7 +3,7 @@ import { stripFrontmatter, type ExtensionAPI, type Skill, type ToolResultEvent }
 import { Text } from "@earendil-works/pi-tui";
 import { DEFAULT_RULE_SOURCES, discoverRules, loadRuleConfig, validateRuleConfigPatch } from "./discovery.js";
 import type { RuleConfigPatch } from "./discovery.js";
-import { extractTarget, ruleMatchesTarget } from "./matching.js";
+import { extractTarget, ruleMatchesTarget, ruleMatchesToolCallEvent } from "./matching.js";
 import type { PendingRule, Rule, RuleInjectionDetails } from "./types.js";
 
 export const CUSTOM_MESSAGE_TYPE = "pi-rules-injection";
@@ -143,13 +143,16 @@ export function makeExtension() {
 
       let shouldBlock = false;
       for (const rule of rules) {
-        if (injectedRuleIds.has(rule.id) || (rule.paths && !ruleMatchesTarget(rule, target))) continue;
+        if (injectedRuleIds.has(rule.id)) continue;
+        if (rule.paths && !ruleMatchesTarget(rule, target)) continue;
+        if (!ruleMatchesToolCallEvent(rule, event.toolName)) continue;
         shouldBlock = true;
         const pending = pendingRules.get(rule.id);
+        const isScoped = Boolean(rule.paths || rule.events);
         if (pending) {
-          if (rule.paths) pending.targets.add(target);
+          if (isScoped) pending.targets.add(target);
         } else {
-          pendingRules.set(rule.id, { rule, targets: new Set(rule.paths ? [target] : []) });
+          pendingRules.set(rule.id, { rule, targets: new Set(isScoped ? [target] : []) });
         }
       }
       if (!shouldBlock) return;
@@ -269,7 +272,7 @@ async function loadSkillBlocks(
 }
 
 function freshUnconditionalRules(rules: Rule[], injectedRuleIds: Set<string>): Rule[] {
-  return rules.filter((rule) => !rule.paths && !injectedRuleIds.has(rule.id));
+  return rules.filter((rule) => !rule.paths && !rule.events && !injectedRuleIds.has(rule.id));
 }
 
 function comparePendingRules(left: PendingRule, right: PendingRule): number {

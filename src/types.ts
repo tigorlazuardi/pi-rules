@@ -1,9 +1,16 @@
+export type RuleToolName = "read" | "edit" | "write";
+
+export interface RuleEvents {
+  tool_call: RuleToolName[];
+}
+
 export interface Rule {
   id: string;
   sourcePath: string;
   sourceLabel: string;
   body: string;
   paths?: string[];
+  events?: RuleEvents;
   skills?: string[];
 }
 

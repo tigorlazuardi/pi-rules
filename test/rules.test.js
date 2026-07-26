@@ -11,7 +11,7 @@ import extension, {
   emitPiRulesConfig,
   isSuccessfulGitCommit,
 } from "../dist/index.js";
-import { extractTarget, ruleMatchesTarget } from "../dist/matching.js";
+import { extractTarget, ruleMatchesTarget, ruleMatchesToolCallEvent } from "../dist/matching.js";
 
 async function withTempDirectory(run) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "pi-rules-test-"));
@@ -240,23 +240,32 @@ test("warns without crashing when config fails TypeBox validation", async () => 
   });
 });
 
-test("accepts path and skill lists, ignores unknown fields, and diagnoses malformed frontmatter", async () => {
+test("accepts path, event, and skill filters while diagnosing malformed frontmatter", async () => {
   await withTempDirectory(async (cwd) => {
     const valid = path.join(cwd, "valid.md");
     const extra = path.join(cwd, "extra.md");
     const malformed = path.join(cwd, "malformed.md");
-    await writeFile(valid, "---\npaths:\n  - src/**/*.ts\n  - tests/**\nskills:\n  - tdd\n  - code-review\n---\nTyped", "utf8");
+    const unsupportedEvent = path.join(cwd, "unsupported-event.md");
+    const unsupportedTool = path.join(cwd, "unsupported-tool.md");
+    await writeFile(valid, "---\npaths:\n  - src/**/*.ts\n  - tests/**\nevents:\n  tool_call: [edit, write]\nskills:\n  - tdd\n  - code-review\n---\nTyped", "utf8");
     await writeFile(extra, "---\ndescription: old schema\nalwaysApply: true\n---\nOld", "utf8");
     await writeFile(malformed, "---\npaths: [src/**\n---\nBad", "utf8");
+    await writeFile(unsupportedEvent, "---\nevents:\n  tool_result: read\n---\nBad event", "utf8");
+    await writeFile(unsupportedTool, "---\nevents:\n  tool_call: bash\n---\nBad tool", "utf8");
 
     const validResult = await parseRuleFile(valid, "valid.md");
     const extraResult = await parseRuleFile(extra, "extra.md");
     const malformedResult = await parseRuleFile(malformed, "malformed.md");
+    const eventResult = await parseRuleFile(unsupportedEvent, "unsupported-event.md");
+    const toolResult = await parseRuleFile(unsupportedTool, "unsupported-tool.md");
 
     assert.deepEqual(validResult.rule.paths, ["src/**/*.ts", "tests/**"]);
+    assert.deepEqual(validResult.rule.events, { tool_call: ["edit", "write"] });
     assert.deepEqual(validResult.rule.skills, ["tdd", "code-review"]);
     assert.equal(extraResult.rule.body, "Old");
     assert.match(malformedResult.diagnostic.reason, /invalid YAML/);
+    assert.match(eventResult.diagnostic.reason, /unsupported Pi event: tool_result/);
+    assert.equal(toolResult.diagnostic.reason, "events.tool_call supports only read, edit, or write");
   });
 });
 
@@ -298,17 +307,21 @@ test("recognizes successful direct git commit commands", () => {
   assert.equal(isSuccessfulGitCommit(bashResult("git commit -m nope", { isError: true })), false);
 });
 
-test("matches Claude-style project-relative globs including dotfiles", () => {
+test("matches Claude-style paths and optional Pi tool_call filters", () => {
   const rule = {
     id: "rule",
     sourcePath: "/workspace/.agents/rules/typescript.md",
     sourceLabel: ".agents/rules/typescript.md",
     body: "Typed",
     paths: ["./src/**/*.{ts,tsx}", ".github/**"],
+    events: { tool_call: ["edit", "write"] },
   };
   assert.equal(ruleMatchesTarget(rule, "src/app.tsx"), true);
   assert.equal(ruleMatchesTarget(rule, ".github/workflows/ci.yml"), true);
   assert.equal(ruleMatchesTarget(rule, "README.md"), false);
+  assert.equal(ruleMatchesToolCallEvent(rule, "read"), false);
+  assert.equal(ruleMatchesToolCallEvent(rule, "edit"), true);
+  assert.equal(ruleMatchesToolCallEvent({ ...rule, events: undefined }, "read"), true);
 });
 
 test("injects unconditional rules before first model call", async () => {
@@ -480,6 +493,35 @@ test("parallel preflight matches aggregate once and block every governed tool", 
     assert.equal(await fake.emit("tool_call", toolCall("read", "src/c.ts"), { cwd }), undefined);
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.equal(fake.sent.length, 1);
+  });
+});
+
+test("tool_call event filters skip reads and activate before edits or writes", async () => {
+  await withTempDirectory(async (cwd) => {
+    await writeRule(
+      cwd,
+      ".pi/rules/write-only.md",
+      "---\npaths: src/**\nevents:\n  tool_call: [edit, write]\n---\nMutation rule",
+    );
+    const fake = createFakePi();
+    extension(fake.api);
+    await fake.emit("session_start", { type: "session_start", reason: "startup" }, { cwd });
+
+    assert.equal(await fake.emit("tool_call", toolCall("read", "src/a.ts"), { cwd }), undefined);
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
+    assert.equal(fake.sent.length, 0);
+
+    const editCall = await fake.emit("tool_call", toolCall("edit", "src/a.ts"), { cwd });
+    assert.equal(editCall.block, true);
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
+    assert.deepEqual(fake.sent[0].message.details.targets, { ".pi/rules/write-only.md": ["src/a.ts"] });
+
+    await fake.emit("session_compact", { type: "session_compact", willRetry: true }, { cwd });
+    assert.equal(fake.sent.length, 1);
+    const writeCall = await fake.emit("tool_call", toolCall("write", "src/b.ts"), { cwd });
+    assert.equal(writeCall.block, true);
+    await fake.emit("turn_end", { type: "turn_end" }, { cwd });
+    assert.deepEqual(fake.sent[1].message.details.targets, { ".pi/rules/write-only.md": ["src/b.ts"] });
   });
 });
 
