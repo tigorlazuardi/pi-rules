@@ -27,7 +27,7 @@ pi -e npm:@tigorhutasuhut/pi-rules
 Pin, update, or remove the package:
 
 ```sh
-pi install npm:@tigorhutasuhut/pi-rules@0.5.1
+pi install npm:@tigorhutasuhut/pi-rules@0.5.2
 pi update npm:@tigorhutasuhut/pi-rules
 pi remove npm:@tigorhutasuhut/pi-rules
 ```

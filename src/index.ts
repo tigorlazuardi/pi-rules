@@ -158,7 +158,7 @@ export function makeExtension() {
       if (!shouldBlock) return;
 
       // ponytail: reads can finish before the next model turn; mutations pause because their arguments are already issued.
-      return { block: true, reason: `Tool \`${event.toolName}\` paused: matching rules aren't loaded yet. Pi will load them first; please retry.` };
+      return { block: true, reason: `[pi-rules] Tool \`${event.toolName}\` paused so Pi can load matching rules. Review them, adjust the change if needed, then retry.` };
     });
 
     pi.on("tool_result", (event) => {

@@ -517,7 +517,7 @@ test("path rules inject after reads and block before edits or writes", async () 
     assert.equal(fake.sent.length, 1);
     const editCall = await fake.emit("tool_call", toolCall("edit", "src/a.ts"), { cwd });
     assert.equal(editCall.block, true);
-    assert.equal(editCall.reason, "Tool `edit` paused: matching rules aren't loaded yet. Pi will load them first; please retry.");
+    assert.equal(editCall.reason, "[pi-rules] Tool `edit` paused so Pi can load matching rules. Review them, adjust the change if needed, then retry.");
     await fake.emit("turn_end", { type: "turn_end" }, { cwd });
     assert.deepEqual(fake.sent[1].message.details.targets, { ".pi/rules/scoped.md": ["src/a.ts"] });
 
