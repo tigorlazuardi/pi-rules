@@ -1,6 +1,6 @@
 {
   "name": "@tigorhutasuhut/pi-rules",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Claude-compatible project rules for Pi agents and subagents",
   "type": "module",
   "main": "dist/index.js",
@@ -27,20 +27,19 @@
   },
   "dependencies": {
     "picomatch": "4.0.5",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "typebox": "1.1.38"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.81.1",
     "@earendil-works/pi-tui": "0.81.1",
     "@types/node": "24.3.0",
     "@types/picomatch": "4.0.2",
-    "typebox": "1.1.38",
     "typescript": "5.7.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-tui": "*"
   },
   "engines": {
     "node": ">=20.6.0"

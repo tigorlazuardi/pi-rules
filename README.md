@@ -216,7 +216,7 @@ emitPiRulesConfig(pi, {
 
 The event bus is already scoped to the current Pi runtime, so no `ExtensionContext` needs to cross extension boundaries. Raw emitters may call `pi.events.emit("pi-rules:config", patch)`. Updates that fail the TypeBox configuration schema are rejected and shown through Pi's warning notification, or stderr when no UI exists. Patches apply immediately; emitters own event timing.
 
-Pi 0.80.10 and newer bundle the `typebox` package name for extension schemas. Import from `typebox` and `typebox/schema`; do not use the old `@sinclair/typebox` package name.
+Pi 0.80.10 and newer use the `typebox` package name for extension schemas. Import from `typebox` and `typebox/schema`; do not use the old `@sinclair/typebox` package name. Packages that deep-import `typebox/schema` should keep `typebox` as a runtime dependency so package loaders resolve the matching subpath implementation.
 
 ## Runtime behavior
 
