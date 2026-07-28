@@ -216,6 +216,8 @@ emitPiRulesConfig(pi, {
 
 The event bus is already scoped to the current Pi runtime, so no `ExtensionContext` needs to cross extension boundaries. Raw emitters may call `pi.events.emit("pi-rules:config", patch)`. Updates that fail the TypeBox configuration schema are rejected and shown through Pi's warning notification, or stderr when no UI exists. Patches apply immediately; emitters own event timing.
 
+Pi 0.80.10 and newer bundle the `typebox` package name for extension schemas. Import from `typebox` and `typebox/schema`; do not use the old `@sinclair/typebox` package name.
+
 ## Runtime behavior
 
 - Unconditional rules and their linked skills inject once per compaction epoch before the first model call.
