@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -123,6 +123,30 @@ test("merges rule roots by priority and deduplicates rule names", async () => {
     assert.deepEqual(result.rules[0].paths, ["src/auth/**"]);
     assert.equal(result.rules[0].body, "Auth rule");
     assert.equal(result.rules[1].paths, undefined);
+    assert.equal(result.diagnostics.length, 0);
+  });
+});
+
+test("follows symlinks while preserving source precedence and stopping cycles", async () => {
+  await withTempDirectory(async (root) => {
+    const cwd = path.join(root, "repo");
+    const shared = path.join(root, "shared");
+    await writeRule(cwd, ".pi/rules/auth.md", "Repo auth");
+    await writeRule(root, "single.md", "Linked file");
+    await writeRule(root, "shared/auth.md", "Ignored linked auth");
+    await writeRule(root, "shared/common.md", "Linked directory");
+    await symlink(path.join(root, "single.md"), path.join(cwd, ".pi/rules/single.md"));
+    await mkdir(path.join(cwd, ".agents/rules"), { recursive: true });
+    await symlink(shared, path.join(cwd, ".agents/rules/shared"), "dir");
+    await symlink(shared, path.join(shared, "cycle"), "dir");
+
+    const result = await discoverRules(cwd, { home: path.join(root, "home"), env: {} });
+
+    assert.deepEqual(result.rules.map((rule) => [rule.sourceLabel, rule.body]), [
+      [".pi/rules/auth.md", "Repo auth"],
+      [".pi/rules/single.md", "Linked file"],
+      [".agents/rules/shared/common.md", "Linked directory"],
+    ]);
     assert.equal(result.diagnostics.length, 0);
   });
 });

@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import Type from "typebox";
@@ -211,27 +211,43 @@ export async function parseRuleFile(sourcePath: string, sourceLabel: string): Pr
   return { rule };
 }
 
-async function findMarkdownFiles(directory: string): Promise<string[]> {
+async function findMarkdownFiles(directory: string, ancestors = new Set<string>()): Promise<string[]> {
   let entries;
+  let resolvedDirectory: string;
   try {
+    resolvedDirectory = await realpath(directory);
     entries = await readdir(directory, { withFileTypes: true });
   } catch (error) {
     if (getErrorCode(error) === "ENOENT") return [];
     throw error;
   }
 
+  // ponytail: track current ancestry only; permits aliases while stopping symlink cycles.
+  if (ancestors.has(resolvedDirectory)) return [];
+  const nextAncestors = new Set(ancestors).add(resolvedDirectory);
   const files: string[] = [];
   entries.sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
-    if (entry.isSymbolicLink()) continue;
-    if (entry.isDirectory()) {
-      const nested = await findMarkdownFiles(path.join(directory, entry.name));
+    const entryPath = path.join(directory, entry.name);
+    let isDirectory = entry.isDirectory();
+    let isFile = entry.isFile();
+    if (entry.isSymbolicLink()) {
+      try {
+        const target = await stat(entryPath);
+        isDirectory = target.isDirectory();
+        isFile = target.isFile();
+      } catch (error) {
+        if (getErrorCode(error) === "ENOENT" && entry.name.endsWith(".md")) files.push(entry.name);
+        else if (getErrorCode(error) !== "ENOENT") throw error;
+        continue;
+      }
+    }
+    if (isDirectory) {
+      const nested = await findMarkdownFiles(entryPath, nextAncestors);
       files.push(...nested.map((relativePath) => `${entry.name}/${relativePath}`));
       continue;
     }
-    if (entry.isFile() && entry.name.endsWith(".md")) {
-      files.push(entry.name);
-    }
+    if (isFile && entry.name.endsWith(".md")) files.push(entry.name);
   }
   return files;
 }

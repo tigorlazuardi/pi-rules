@@ -125,7 +125,7 @@ Rules are read recursively from every configured source in priority order:
 
 Default Pi user rules live in `~/.pi/agent/rules/`.
 
-Rules from all sources are merged. The filename stem is the rule name: both `backend/auth.md` and `auth.md` are named `auth`. The first source containing a name wins; later rules with that name are skipped. Files are sorted within each source, so the first same-name file there wins too. Symlinks are ignored.
+Rules from all sources are merged. The filename stem is the rule name: both `backend/auth.md` and `auth.md` are named `auth`. The first source containing a name wins; later rules with that name are skipped. Files are sorted within each source, so the first same-name file there wins too. Symlinked files and directories are followed with the same precedence; directory cycles are skipped.
 
 `PI_CODING_AGENT_DIR` points directly to Pi's agent directory. When unset, the directory resolves to `${PI_CONFIG_DIR:-~/.pi}/agent`.
 
