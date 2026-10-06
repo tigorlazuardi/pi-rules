@@ -2,7 +2,7 @@ import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import Type from "typebox";
-import Schema from "typebox/schema";
+import { Compile } from "typebox/compile";
 import { parseDocument } from "yaml";
 import type { DiscoveryResult, Rule, RuleDiagnostic, RuleEvents, RuleToolName } from "./types.js";
 
@@ -21,8 +21,8 @@ export const RULE_CONFIG_SCHEMA = Type.Object({
 });
 export const RULE_CONFIG_PATCH_SCHEMA = Type.Partial(RULE_CONFIG_SCHEMA);
 
-const RULE_CONFIG_VALIDATOR = Schema.Compile(RULE_CONFIG_SCHEMA);
-const RULE_CONFIG_PATCH_VALIDATOR = Schema.Compile(RULE_CONFIG_PATCH_SCHEMA);
+const RULE_CONFIG_VALIDATOR = Compile(RULE_CONFIG_SCHEMA);
+const RULE_CONFIG_PATCH_VALIDATOR = Compile(RULE_CONFIG_PATCH_SCHEMA);
 
 export type RuleSource = Type.Static<typeof RULE_SOURCE_SCHEMA>;
 export type RuleConfig = Type.Static<typeof RULE_CONFIG_SCHEMA>;
@@ -60,8 +60,7 @@ type ParseResult = { rule: Rule } | { diagnostic: RuleDiagnostic };
 
 export function validateRuleConfigPatch(value: unknown): { config: RuleConfigPatch } | { reason: string } {
   if (RULE_CONFIG_PATCH_VALIDATOR.Check(value)) return { config: value };
-  const [, errors] = RULE_CONFIG_PATCH_VALIDATOR.Errors(value);
-  const first = errors[0];
+  const [first] = RULE_CONFIG_PATCH_VALIDATOR.Errors(value);
   return { reason: first ? `${first.instancePath || "/"}: ${first.message}` : "schema validation failed" };
 }
 
@@ -90,8 +89,7 @@ export async function loadRuleConfig(cwd: string, options: DiscoveryOptions = {}
     }
 
     if (!RULE_CONFIG_VALIDATOR.Check(value)) {
-      const [, errors] = RULE_CONFIG_VALIDATOR.Errors(value);
-      const first = errors[0];
+      const [first] = RULE_CONFIG_VALIDATOR.Errors(value);
       const reason = first ? `${first.instancePath || "/"}: ${first.message}` : "schema validation failed";
       return invalidConfig(configPath, labelPath(configPath, cwd, home), reason);
     }
